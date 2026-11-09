@@ -8,7 +8,7 @@ import { batchSiteSpeedTest, appendSpeedToName, filterUnreachableSites, type Sit
 import { macCMSToTVBoxSites, processMacCMSForLocal } from './core/maccms';
 import { rewriteJarUrls } from './core/jar-proxy';
 import { mergeLivesToNative, separatedMergeLives, formatLiveGroupsAsTxt, type LiveSourceInput } from './core/live-merger';
-import { loadDeadUrls, purgeProtectedUrls, pruneUnreferencedDeadUrls } from './core/live-deadlist';
+import { loadDeadUrls, purgeProtectedUrls, condemnExpired } from './core/live-deadlist';
 import { reverifyHeadSources } from './core/live-verify';
 import { withProbeNet } from './core/probe-net';
 import { trimGroupsToTopN } from './core/live-url';
@@ -532,22 +532,22 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   // Step 6.6: 死源黑名单过滤（管理后台「清理死源」按钮写入）
   // 只过滤输出，不影响测速：测速仍按完整频道树跑，源恢复后会自动移出黑名单
   if (Array.isArray(merged.lives) && merged.lives.length > 0) {
-    // 先把受保护域名（南京广电官方源等）从黑名单里回捞，避免历史误判继续吃台
+    // 先把受保护域名（南京广电官方源等）从台账里回捞，避免历史误判继续吃台
     const revivedProtected = await purgeProtectedUrls(storage);
     if (revivedProtected > 0) {
       logger.infoFields('aggregation', 'dead-list-protected-revived', { urls: revivedProtected });
     }
 
-    // 再按引用剪枝：不在当前树里的死链永远不会被重测、也就永远不会自愈，留着只是占地方
-    const referenced = new Set<string>();
-    for (const group of merged.lives as Array<{ channels?: Array<{ urls?: string[] }> }>) {
-      for (const ch of group.channels || []) {
-        for (const u of ch.urls || []) referenced.add(bareUrl(u));
+    // 死满一个月且仍然死 → 转「判死」（只降频，不删除）
+    if (Array.isArray(merged.lives) && merged.lives.length > 0) {
+      const curSpeed = await loadChannelSpeedMap(storage);
+      const condemned = await condemnExpired(storage, (u) => {
+        const e = curSpeed[u];
+        return !e || e.kind === 'fail';
+      });
+      if (condemned.promoted > 0) {
+        logger.infoFields('aggregation', 'dead-list-condemned', condemned);
       }
-    }
-    const pruned = await pruneUnreferencedDeadUrls(storage, referenced);
-    if (pruned.removed > 0) {
-      logger.infoFields('aggregation', 'dead-list-pruned', pruned);
     }
 
     const deadUrls = await loadDeadUrls(storage);

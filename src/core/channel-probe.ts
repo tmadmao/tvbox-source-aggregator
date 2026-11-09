@@ -25,7 +25,13 @@ import {
 import { extractAllUrls } from './live-merger';
 import { netFetch } from './probe-net';
 import { recordProbe } from './source-health';
-import { removeRecoveredUrls } from './live-deadlist';
+import {
+  removeRecoveredUrls,
+  loadDeadRows,
+  touchProbed,
+  DEAD_RETEST_MS,
+  CONDEMNED_RETEST_MS,
+} from './live-deadlist';
 
 // ─── 开关/状态 ─────────────────────────────────────────
 
@@ -532,6 +538,8 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
     // 读旧缓存：不过期就复用，过期的全部重测（旧实现是「测过就永不再测」，导致排序永久固化）
     const cached = await loadSpeedMap(storage);
     const nowMs = Date.now();
+    // 死源台账：决定「判过死的源多久回测一次」。台账里没有的，仍走原来的 6h/24h 规则。
+    const deadLedger = new Map((await loadDeadRows(storage)).map((r) => [r.url, r]));
     /**
      * 条目版本：显式写了 ruleVer 就用它；没写但带 stage 的，说明是「分片复验」之后产生的，
      * 视为当前版本（迁移老缓存时避免整表重测一次）；两者都没有的才是上个时代的结论。
@@ -558,10 +566,14 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
 
     /**
      * 分级回测间隔：
-     *   成功源 6 小时；失败但未确认 6 小时；确认死链 24 小时（撞一次要等满超时，不必和好源一样勤）
+     *   成功源 6 小时；失败但未确认 6 小时；
+     *   进了台账的：待观察 7 天、判死 30 天（台账就是「这源判过死」的记录，比 fails 计数更权威）；
+     *   没进台账但连续失败的，仍按 24 小时。
      * 规则版本落后的条目不看时间，直接进队列。
      */
-    const recheckInterval = (e: ChannelSpeedEntry): number => {
+    const recheckInterval = (u: string, e: ChannelSpeedEntry): number => {
+      const row = deadLedger.get(u);
+      if (row) return row.state === 2 ? CONDEMNED_RETEST_MS : DEAD_RETEST_MS;
       if (e.kind === 'fail' && (e.fails ?? 0) >= CHANNEL_DEAD_FAILS) return CHANNEL_DEAD_RECHECK_MS;
       return CHANNEL_SPEED_TTL_MS;
     };
@@ -571,7 +583,7 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
       if (!e) return true;
       if (isOutdated(u)) return true;
       const t = Date.parse(e.probedAt);
-      return !isFinite(t) || nowMs - t > recheckInterval(e);
+      return !isFinite(t) || nowMs - t > recheckInterval(u, e);
     };
 
     // 待测队列：规则升级的排最前（它们决定排序是否可信），其余按上次测速时间由旧到新
@@ -597,8 +609,10 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
       if (urlSet.has(u)) next[u] = e;
     }
 
-    // 本轮恢复可用的 URL（用于自动移出死源黑名单）
+    // 本轮恢复可用的 URL（用于自动移出死源台账）
     const recovered: string[] = [];
+    // 台账里被回测过的 URL（用于刷新 probedAt，让周/月周期从这次算起）
+    const probedInLedger: Array<{ url: string; ok: boolean }> = [];
 
     // 每条结果即时落到 next，并定期落盘 —— 跑 20 分钟的任务不能一崩全丢
     const applyResult = (r: ProbeResult): void => {
@@ -608,6 +622,7 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
         success++;
         recovered.push(r.url);
       }
+      if (deadLedger.has(r.url)) probedInLedger.push({ url: r.url, ok: r.kind !== 'fail' });
       // 健康字段只经由 recordProbe 写入，probe 与「输出前复核」共用同一口径
       const entry = recordProbe(next, r.url, r);
       entry.ruleVer = CHANNEL_PROBE_RULE_VERSION;
@@ -637,11 +652,15 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
 
     await saveSpeedMap(storage, next);
 
-    // 自愈：之前被判死、这次又活了的 URL，移出死源黑名单
+    // 自愈：之前被判死、这次又活了的 URL，移出死源台账
     if (recovered.length > 0) {
       const revived = await removeRecoveredUrls(storage, recovered);
-      if (revived > 0) console.log(`[channel-probe] ${revived} URLs recovered, removed from dead list`);
+      if (revived > 0) console.log(`[channel-probe] ${revived} URLs recovered, removed from dead ledger`);
     }
+
+    // 回测过但仍死的：只刷新「上次回测时间」，让 7 天 / 30 天的周期从这次重新计时
+    const stillDead = probedInLedger.filter((x) => !x.ok).map((x) => x.url);
+    if (stillDead.length > 0) await touchProbed(storage, stillDead);
 
     // 覆盖率按「可用缓存」算：成功 + 未过期未重测的
     const okCached = Object.entries(next).filter(

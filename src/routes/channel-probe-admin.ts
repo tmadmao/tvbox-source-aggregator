@@ -12,9 +12,9 @@ import {
   isRunning,
   clearSpeedMap,
 } from '../core/channel-probe';
-import { addDeadUrls, loadDeadUrls, clearDeadUrls, pruneUnreferencedDeadUrls } from '../core/live-deadlist';
+import { addDeadUrls, loadDeadUrls, loadDeadRows, clearDeadUrls, ledgerStats, DEAD_RETEST_MS, CONDEMNED_RETEST_MS } from '../core/live-deadlist';
+import { KV_LIVE_DEAD_URLS, KV_CHANNEL_MERGED_TREE } from '../core/config';
 import { bareUrl } from '../core/live-url';
-import { KV_CHANNEL_MERGED_TREE } from '../core/config';
 
 function verifyAdmin(request: Request, config: AppConfig): boolean {
   const token = config.adminToken;
@@ -157,21 +157,45 @@ export function mountChannelProbeRoutes(app: Hono, deps: ChannelProbeRouteDeps):
     return c.json({ success: true, cleared: before.length });
   });
 
-  // POST /admin/channel-probe/prune-dead — 按引用剪枝：删掉已不在任何源里的死链
-  // 返回剪枝前后的条数与按域名统计，方便看清「谁把名单撑大的」
-  app.post('/admin/channel-probe/prune-dead', async (c) => {
+  // GET /admin/channel-probe/ledger — 死源台账概览（不删任何东西，只回答「有多少、该测多少」）
+  app.get('/admin/channel-probe/ledger', async (c) => {
     if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    const rows = await loadDeadRows(storage);
+    const stats = ledgerStats(rows);
 
-    const rawTree = await storage.get(KV_CHANNEL_MERGED_TREE);
-    if (!rawTree) return c.json({ error: '还没有频道树，先跑一次聚合' }, 400);
-
-    let groups: Array<{ channels?: Array<{ urls?: string[] }> }> = [];
-    try { groups = JSON.parse(rawTree); } catch { return c.json({ error: '频道树解析失败' }, 500); }
-
+    // 「该回测多少条」只对仍在频道树里的源有意义：孤儿不在树上，永远不会进测速队列
     const referenced = new Set<string>();
-    for (const g of groups) for (const ch of g.channels || []) for (const u of ch.urls || []) referenced.add(bareUrl(u));
+    const rawTree = await storage.get(KV_CHANNEL_MERGED_TREE);
+    if (rawTree) {
+      try {
+        const groups = JSON.parse(rawTree) as Array<{ channels?: Array<{ urls?: string[] }> }>;
+        for (const g of groups) for (const ch of g.channels || []) for (const u of ch.urls || []) referenced.add(bareUrl(u));
+      } catch { /* ignore */ }
+    }
+    let inTree = 0, dueInTree = 0;
+    const now = Date.now();
+    for (const r of rows) {
+      if (!referenced.has(r.url)) continue;
+      inTree++;
+      const interval = r.state === 2 ? CONDEMNED_RETEST_MS : DEAD_RETEST_MS;
+      if (!r.probedAt || now - r.probedAt >= interval) dueInTree++;
+    }
 
-    const result = await pruneUnreferencedDeadUrls(storage, referenced);
-    return c.json({ success: true, ...result, referenced: referenced.size });
+    const byHost = new Map<string, number>();
+    for (const r of rows) {
+      let h = '(invalid)';
+      try { h = new URL(r.url).hostname.toLowerCase(); } catch { /* ignore */ }
+      byHost.set(h, (byHost.get(h) || 0) + 1);
+    }
+    return c.json({
+      ...stats,
+      inTree,
+      dueInTree,
+      bytes: (await storage.get(KV_LIVE_DEAD_URLS) || '').length,
+      warmRetestDays: DEAD_RETEST_MS / 86400000,
+      condemnedRetestDays: CONDEMNED_RETEST_MS / 86400000,
+      topHosts: [...byHost.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15)
+        .map(([host, n]) => ({ host, n })),
+    });
   });
 }
