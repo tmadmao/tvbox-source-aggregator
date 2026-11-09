@@ -12,7 +12,7 @@ import type { Storage } from '../storage/interface';
 import type { ChannelSpeedMap, TVBoxLiveChannel, TVBoxLiveGroup } from './types';
 import { KV_LIVE_CHANNEL_OVERRIDES } from './config';
 import { parseCctvRank } from './live-order';
-import { bareUrl } from './live-url';
+import { bareUrl, compareBySpeed } from './live-url';
 
 /**
  * 重点频道每个台保留的源数上限。
@@ -230,7 +230,11 @@ function rankIn(group: string, name: string): number {
  * 再把改名后撞车的频道合并（URL 去重后接在一起）。
  * 不做这一步的话，央视会同时冒出来 CCTV-4 America / CCTV4美洲 / CCTV4欧洲 三行。
  */
-function canonicalize(group: string, channels: TVBoxLiveChannel[]): TVBoxLiveChannel[] {
+function canonicalize(
+  group: string,
+  channels: TVBoxLiveChannel[],
+  speedMap?: ChannelSpeedMap,
+): TVBoxLiveChannel[] {
   const merged = new Map<string, { name: string; urls: string[] }>();
 
   // 同一个 URL 被多个源收录时只留一条（`$源名` 不同但地址相同）
@@ -271,10 +275,14 @@ function canonicalize(group: string, channels: TVBoxLiveChannel[]): TVBoxLiveCha
 
   // 合并完再统一封顶：重点频道不吃黑名单，源会堆到两百多条，
   // 电视端每条失败要等 5 秒超时，必须截断。
-  return [...merged.values()].map((v) => ({
-    name: v.name,
-    urls: v.urls.slice(0, MAX_FOCUS_SOURCES),
-  }));
+  return [...merged.values()].map((v) => {
+    // 合并是按「行」拼接的，各行内部虽然排过序，拼起来第一行可能是全死的那一份
+    // （南京十八频道实测：三条死源压在 nklive 活源前面）。所以拼完必须重排一遍。
+    const sorted = speedMap
+      ? [...v.urls].sort((a, b) => compareBySpeed({ url: bareUrl(a) }, { url: bareUrl(b) }, speedMap))
+      : v.urls;
+    return { name: v.name, urls: sorted.slice(0, MAX_FOCUS_SOURCES) };
+  });
 }
 
 // ─── 置顶 / 禁用（overrides） ──────────────────────────
@@ -383,7 +391,7 @@ export function curateGroups(
 
     if (group === '央视' || group === '卫视' || group === '境内地方') {
       const before = chans.length;
-      chans = canonicalize(group, chans);
+      chans = canonicalize(group, chans, speedMap);
       mergedDupes += Math.max(0, before - chans.length);
       if (before !== chans.length) renamed++;
       chans = sortOnly(group, chans);
