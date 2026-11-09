@@ -9,6 +9,7 @@ import { macCMSToTVBoxSites, processMacCMSForLocal } from './core/maccms';
 import { rewriteJarUrls } from './core/jar-proxy';
 import { mergeLivesToNative, separatedMergeLives, formatLiveGroupsAsTxt, type LiveSourceInput } from './core/live-merger';
 import { loadDeadUrls, purgeProtectedUrls, condemnExpired } from './core/live-deadlist';
+import { loadHostMap, isHostCondemned } from './core/host-health';
 import { reverifyHeadSources } from './core/live-verify';
 import { withProbeNet } from './core/probe-net';
 import { trimGroupsToTopN } from './core/live-url';
@@ -551,7 +552,9 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
     }
 
     const deadUrls = await loadDeadUrls(storage);
-    if (deadUrls.length > 0) {
+    // 域名已判死的，名下源整片不输出（比逐条记 URL 台账更省，也更快）
+    const hostMap = await loadHostMap(storage);
+    if (deadUrls.length > 0 || hostMap.size > 0) {
       const deadSet = new Set(deadUrls);
       const keptGroups: typeof merged.lives = [];
       let droppedUrls = 0;
@@ -572,7 +575,7 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
             exemptChannels++;
             continue;
           }
-          const kept = (ch.urls || []).filter((u) => !deadSet.has(bareUrl(u)));
+          const kept = (ch.urls || []).filter((u) => !deadSet.has(bareUrl(u)) && !isHostCondemned(hostMap, u));
           droppedUrls += (ch.urls || []).length - kept.length;
           if (kept.length > 0) channels.push({ ...ch, urls: kept });
           else droppedChannels++;

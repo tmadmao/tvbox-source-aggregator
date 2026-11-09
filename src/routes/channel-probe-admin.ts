@@ -13,7 +13,8 @@ import {
   clearSpeedMap,
 } from '../core/channel-probe';
 import { addDeadUrls, loadDeadUrls, loadDeadRows, clearDeadUrls, ledgerStats, DEAD_RETEST_MS, CONDEMNED_RETEST_MS } from '../core/live-deadlist';
-import { KV_LIVE_DEAD_URLS, KV_CHANNEL_MERGED_TREE } from '../core/config';
+import { KV_LIVE_DEAD_URLS, KV_CHANNEL_MERGED_TREE, KV_CHANNEL_SPEED_MAP } from '../core/config';
+import { loadHostRows, saveHostRows, hostStats, hostOf, HOST_MIN_URLS, HOST_SUSPECT_RETEST_MS, HOST_DEAD_RETEST_MS } from '../core/host-health';
 import { bareUrl } from '../core/live-url';
 
 function verifyAdmin(request: Request, config: AppConfig): boolean {
@@ -155,6 +156,91 @@ export function mountChannelProbeRoutes(app: Hono, deps: ChannelProbeRouteDeps):
       });
     }
     return c.json({ success: true, cleared: before.length });
+  });
+
+  // GET /admin/channel-probe/hosts — 域名台账：多少域名、多少可疑/判死、覆盖多少源
+  app.get('/admin/channel-probe/hosts', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    const rows = await loadHostRows(storage);
+    const stats = hostStats(rows);
+    const top = rows
+      .slice()
+      .sort((a, b) => b.urls - a.urls)
+      .slice(0, 20)
+      .map((r) => ({ host: r.host, state: r.state, urls: r.urls, ok: r.ok,
+        sinceDays: r.since ? Math.round((Date.now() - r.since) / 86400000) : 0 }));
+
+    // 当前频道树里的域名分布（用于回答「还有多少域名没进台账」）
+    let treeHosts = 0;
+    const rawTree = await storage.get(KV_CHANNEL_MERGED_TREE);
+    if (rawTree) {
+      try {
+        const groups = JSON.parse(rawTree) as Array<{ channels?: Array<{ urls?: string[] }> }>;
+        const set = new Set<string>();
+        for (const g of groups) for (const ch of g.channels || []) for (const u of ch.urls || []) {
+          const h = hostOf(bareUrl(u));
+          if (h) set.add(h);
+        }
+        treeHosts = set.size;
+      } catch { /* ignore */ }
+    }
+
+    return c.json({
+      ...stats,
+      treeHosts,
+      untracked: Math.max(0, treeHosts - stats.total),
+      suspectRetestDays: HOST_SUSPECT_RETEST_MS / 86400000,
+      condemnedRetestDays: HOST_DEAD_RETEST_MS / 86400000,
+      top,
+    });
+  });
+
+  // POST /admin/channel-probe/hosts/reseed — 按当前频道树+测速结果重建域名台账
+  // 规则：域名下有 ≥2 条源、且当前一条都播不出来 → 记「可疑」（7 天后抽样复验）
+  // 只做一次性的初始化，之后由测速自己维护
+  app.post('/admin/channel-probe/hosts/reseed', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+
+    const rawTree = await storage.get(KV_CHANNEL_MERGED_TREE);
+    if (!rawTree) return c.json({ error: '还没有频道树，先跑一次聚合' }, 400);
+    let groups: Array<{ channels?: Array<{ urls?: string[] }> }> = [];
+    try { groups = JSON.parse(rawTree); } catch { return c.json({ error: '频道树解析失败' }, 500); }
+
+    const rawSpeed = await storage.get(KV_CHANNEL_SPEED_MAP);
+    let speed: Record<string, { kind?: string }> = {};
+    try { speed = rawSpeed ? JSON.parse(rawSpeed) : {}; } catch { speed = {}; }
+
+    const acc = new Map<string, { all: number; ok: number }>();
+    for (const g of groups) for (const ch of g.channels || []) for (const u of ch.urls || []) {
+      const b = bareUrl(u);
+      const h = hostOf(b);
+      if (!h) continue;
+      const cur = acc.get(h) || { all: 0, ok: 0 };
+      cur.all++;
+      if (speed[b] && speed[b].kind !== 'fail') cur.ok++;
+      acc.set(h, cur);
+    }
+
+    const now = Date.now();
+    const prev = new Map((await loadHostRows(storage)).map((r) => [r.host, r]));
+    const rows = [...prev.values()];
+    const seen = new Set(rows.map((r) => r.host));
+    let added = 0;
+    for (const [host, v] of acc) {
+      if (seen.has(host)) continue;
+      if (v.all < HOST_MIN_URLS || v.ok > 0) continue;
+      rows.push({ host, state: 1, since: now, probedAt: now, urls: v.all, ok: 0 });
+      added++;
+    }
+    // 顺手刷新统计字段（覆盖率变化后，展示的源数不该是旧的）
+    for (const r of rows) {
+      const v = acc.get(r.host);
+      if (!v) continue;
+      r.urls = v.all;
+      r.ok = v.ok;
+    }
+    await saveHostRows(storage, rows);
+    return c.json({ success: true, added, total: rows.length, treeHosts: acc.size });
   });
 
   // GET /admin/channel-probe/ledger — 死源台账概览（不删任何东西，只回答「有多少、该测多少」）

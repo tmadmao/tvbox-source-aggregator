@@ -32,6 +32,16 @@ import {
   DEAD_RETEST_MS,
   CONDEMNED_RETEST_MS,
 } from './live-deadlist';
+import {
+  loadHostMap,
+  saveHostRows,
+  hostSampleQuota,
+  sampleHostUrls,
+  applyHostOutcomes,
+  hostOf,
+  HOST_MIN_URLS,
+  type HostProbeOutcome,
+} from './host-health';
 
 // ─── 开关/状态 ─────────────────────────────────────────
 
@@ -587,7 +597,7 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
     };
 
     // 待测队列：规则升级的排最前（它们决定排序是否可信），其余按上次测速时间由旧到新
-    const toProbe = urls.filter(isStale).sort((a, b) => {
+    const staleUrls = urls.filter(isStale).sort((a, b) => {
       const oa = isOutdated(a) ? 0 : 1;
       const ob = isOutdated(b) ? 0 : 1;
       if (oa !== ob) return oa - ob;
@@ -595,6 +605,41 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
       const tb = cached[b] ? Date.parse(cached[b].probedAt) || 0 : 0;
       return ta - tb;
     });
+
+    /**
+     * 域名层收口（实测：1859 个域名名下 12352 条源一条都播不出来）：
+     *   · 域名进了台账且还没到复验时间 → 名下整片跳过，一条都不测
+     *   · 到了复验时间 → 只抽 3 条（按哈希均匀取，不是取前 3 条）
+     *   · 域名不在台账 → 原样全测
+     * 这样把「一两万条死链每周全测一遍」压到「两千个域名各抽 3 条」。
+     */
+    const hostMap = await loadHostMap(storage);
+    const sampledHosts = new Set<string>();
+    const toProbe: string[] = [];
+    {
+      const byHost = new Map<string, string[]>();
+      for (const u of staleUrls) {
+        const h = hostOf(u);
+        const list = byHost.get(h);
+        if (list) list.push(u); else byHost.set(h, [u]);
+      }
+      for (const [h, list] of byHost) {
+        const quota = hostSampleQuota(hostMap.get(h), nowMs);
+        if (quota < 0) { toProbe.push(...list); continue; }
+        if (quota === 0) continue;                 // 未到复验时间：整域跳过
+        const picked = sampleHostUrls(list, quota);
+        if (picked.length < list.length) sampledHosts.add(h);
+        toProbe.push(...picked);
+      }
+      toProbe.sort((a, b) => {
+        const oa = isOutdated(a) ? 0 : 1;
+        const ob = isOutdated(b) ? 0 : 1;
+        if (oa !== ob) return oa - ob;
+        const ta = cached[a] ? Date.parse(cached[a].probedAt) || 0 : 0;
+        const tb = cached[b] ? Date.parse(cached[b].probedAt) || 0 : 0;
+        return ta - tb;
+      });
+    }
     const freshCount = urls.length - toProbe.length;
     const outdatedCount = urls.filter(isOutdated).length;
     console.log(
@@ -613,6 +658,8 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
     const recovered: string[] = [];
     // 台账里被回测过的 URL（用于刷新 probedAt，让周/月周期从这次算起）
     const probedInLedger: Array<{ url: string; ok: boolean }> = [];
+    // 域名维度的本轮战果：域名 → 测了几条、通了几条
+    const hostResults = new Map<string, { probed: number; ok: number }>();
 
     // 每条结果即时落到 next，并定期落盘 —— 跑 20 分钟的任务不能一崩全丢
     const applyResult = (r: ProbeResult): void => {
@@ -623,6 +670,13 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
         recovered.push(r.url);
       }
       if (deadLedger.has(r.url)) probedInLedger.push({ url: r.url, ok: r.kind !== 'fail' });
+      const h = hostOf(r.url);
+      if (h) {
+        const cur = hostResults.get(h) || { probed: 0, ok: 0 };
+        cur.probed++;
+        if (r.kind !== 'fail') cur.ok++;
+        hostResults.set(h, cur);
+      }
       // 健康字段只经由 recordProbe 写入，probe 与「输出前复核」共用同一口径
       const entry = recordProbe(next, r.url, r);
       entry.ruleVer = CHANNEL_PROBE_RULE_VERSION;
@@ -661,6 +715,26 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
     // 回测过但仍死的：只刷新「上次回测时间」，让 7 天 / 30 天的周期从这次重新计时
     const stillDead = probedInLedger.filter((x) => !x.ok).map((x) => x.url);
     if (stillDead.length > 0) await touchProbed(storage, stillDead);
+
+    /**
+     * 域名台账结算：
+     *   有任一条通 → 域名恢复正常（撤销记录，名下源重新参与输出）
+     *   抽样全失败且样本 ≥ 2 条 → 可疑；可疑满 30 天 → 判死（名下源不再输出）
+     * 只测了 1 条就全失败的不下结论 —— 单条失败可能只是那个地址坏了，不能代表整个域名。
+     */
+    const outcomes: HostProbeOutcome[] = [];
+    for (const [h, o] of hostResults) {
+      if (o.ok > 0 || o.probed >= HOST_MIN_URLS) outcomes.push({ host: h, probed: o.probed, ok: o.ok });
+    }
+    if (outcomes.length > 0) {
+      const applied = applyHostOutcomes(hostMap, outcomes, Date.now());
+      if (applied.revived || applied.marked || applied.condemned) {
+        await saveHostRows(storage, [...hostMap.values()]);
+        console.log(
+          `[channel-probe] host ledger: revived=${applied.revived} marked=${applied.marked} condemned=${applied.condemned}`,
+        );
+      }
+    }
 
     // 覆盖率按「可用缓存」算：成功 + 未过期未重测的
     const okCached = Object.entries(next).filter(

@@ -73,6 +73,7 @@ export const KV_LIVE_HEAD_VERIFY = 'live_head_verify'; // 输出前复核首位�
 export const KV_CHANNEL_REGISTRY = 'live_channel_registry'; // 频道目录（固化框架）
 export const KV_LIVE_TOP_N = 'live_top_n';                   // 每频道保留源数（一键选优） // 频道测速是否并入聚合流程
 export const KV_LIVE_CHANNEL_OVERRIDES = 'live_channel_overrides'; // 频道置顶/禁用（人工覆盖）
+export const KV_LIVE_HOST_STATE = 'live_host_state';           // 域名健康台账（可疑/判死）
 export const KV_LIVE_USE_CONFIG_LIVES = 'live_use_config_lives'; // 是否采用配置源自带的 lives（默认否）
 export const KV_FTP_SYNC = 'ftp_sync';                       // FTP 对外发布配置           // 手动「清理死源」后持久化的黑名单（源恢复后自动移出）
 
