@@ -15,6 +15,7 @@ import {
   CHANNEL_PROBE_SEGMENT_TIMEOUT_MS,
   CHANNEL_PROBE_SEGMENT_BYTES,
   CHANNEL_PROBE_SEGMENT_MIN_BYTES,
+  CHANNEL_PROBE_SEGMENT_MIN_KBPS,
   CHANNEL_SPEED_TTL_MS,
   CHANNEL_DEAD_RECHECK_MS,
   CHANNEL_PROBE_RULE_VERSION,
@@ -71,7 +72,7 @@ export async function loadSpeedMap(storage: Storage): Promise<ChannelSpeedMap> {
   }
 }
 
-async function saveSpeedMap(storage: Storage, map: ChannelSpeedMap): Promise<void> {
+export async function saveSpeedMap(storage: Storage, map: ChannelSpeedMap): Promise<void> {
   await storage.put(KV_CHANNEL_SPEED_MAP, JSON.stringify(map));
 }
 
@@ -177,6 +178,7 @@ async function probeSegment(url: string): Promise<{ ok: boolean; bytes: number; 
     if (!reader) return { ok: false, bytes: 0, note: '分片无响应体' };
 
     let got = 0;
+    const readStart = Date.now();
     try {
       while (got < CHANNEL_PROBE_SEGMENT_BYTES) {
         const { value, done } = await reader.read();
@@ -188,8 +190,17 @@ async function probeSegment(url: string): Promise<{ ok: boolean; bytes: number; 
       reader.cancel().catch(() => {});
     }
 
-    if (got >= CHANNEL_PROBE_SEGMENT_MIN_BYTES) return { ok: true, bytes: got };
-    return { ok: false, bytes: got, note: `分片仅 ${got}B` };
+    const elapsed = Math.max(1, Date.now() - readStart);
+    const kbps = Math.round((got / 1024) / (elapsed / 1000));
+
+    if (got < CHANNEL_PROBE_SEGMENT_MIN_BYTES) {
+      return { ok: false, bytes: got, note: `分片仅 ${got}B` };
+    }
+    // 「能开头、播不动」的源对电视端等于死链：读到数据还不够，吞吐得够
+    if (kbps < CHANNEL_PROBE_SEGMENT_MIN_KBPS) {
+      return { ok: false, bytes: got, note: `吞吐仅 ${kbps}KB/s` };
+    }
+    return { ok: true, bytes: got };
   } catch (e) {
     const timedOut = e instanceof Error && e.name === 'AbortError';
     return { ok: false, bytes: 0, note: timedOut ? '分片超时' : '分片请求失败' };
@@ -248,7 +259,7 @@ export function setSegmentCheckEnabled(v: boolean): void {
   segmentCheckEnabled = v;
 }
 
-interface OnceResult {
+export interface OnceResult {
   speedMs: number;
   kind: 'm3u8' | 'ts' | 'tcp' | 'fail';
   timedOut: boolean;
@@ -256,7 +267,7 @@ interface OnceResult {
   note?: string;
 }
 
-async function probeOnce(url: string, skipL2 = false): Promise<OnceResult> {
+export async function probeUrlOnce(url: string, skipL2 = false): Promise<OnceResult> {
   const isM3U8 = /\.m3u8(\?|$)/i.test(url);
   const isTs = /\.(ts|flv|mp4)(\?|$)/i.test(url);
 
@@ -351,7 +362,7 @@ async function probeSingle(url: string): Promise<ProbeResult> {
 
   for (let i = 0; i < CHANNEL_PROBE_SAMPLES; i++) {
     // L2 结果对同一条 URL 是结构性的，只在第一次采样做，后续采样跳过（省一半分片请求）
-    const r = await probeOnce(url, i > 0);
+    const r = await probeUrlOnce(url, i > 0);
     if (r.kind === 'fail') {
       if (r.stage === 'segment') {
         // 分片 404 / 拉不到数据：重试无意义，直接判死并记下原因
@@ -359,7 +370,7 @@ async function probeSingle(url: string): Promise<ProbeResult> {
         break;
       }
       if (r.timedOut) break;
-      const retry = await probeOnce(url, true);
+      const retry = await probeUrlOnce(url, true);
       if (retry.kind === 'fail') break;
       ok.push({ speedMs: retry.speedMs, kind: retry.kind });
     } else {
@@ -531,8 +542,9 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
      */
     const entryVersion = (e: ChannelSpeedEntry): number => {
       if (e.ruleVer) return e.ruleVer;
+      // 失败结论与判定深度无关（列表都拿不到），视为当前版本
       if (e.kind === 'fail') return CHANNEL_PROBE_RULE_VERSION;
-      if (e.stage === 'segment') return CHANNEL_PROBE_RULE_VERSION;
+      // 成功但没盖版本号 = 更早的规则判的，按当前规则重判一次
       return 2;
     };
 

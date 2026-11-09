@@ -68,7 +68,8 @@ export const KV_LIVE_GROUP_MERGE = 'live_group_merge';     // 直播分组归并
 export const KV_SITE_KEEP_LINK = 'site_keep_link';         // 不可达剔除时是否保留链接（true=仅跳过探测）
 export const KV_SITE_SKIP_LIST = 'site_skip_list';         // 保留模式下被跳过的站点指纹
 export const KV_LIVE_SHOPPING_FILTER = 'live_shopping_filter'; // 购物台过滤（开关 + 关键词）
-export const KV_CHANNEL_PROBE_INLINE = 'channel_probe_inline'; // 频道测速是否并入聚合流程
+export const KV_CHANNEL_PROBE_INLINE = 'channel_probe_inline';
+export const KV_LIVE_HEAD_VERIFY = 'live_head_verify'; // 输出前复核首位源（默认开） // 频道测速是否并入聚合流程
 export const KV_LIVE_USE_CONFIG_LIVES = 'live_use_config_lives'; // 是否采用配置源自带的 lives（默认否）
 export const KV_FTP_SYNC = 'ftp_sync';                       // FTP 对外发布配置           // 手动「清理死源」后持久化的黑名单（源恢复后自动移出）
 
@@ -118,7 +119,9 @@ export const CHANNEL_PROBE_BUDGET_MS = 20 * 60 * 1000;
 // 实测：排第一的源里 23% 是「列表 200 但分片 404/超时」，光看 #EXTM3U 判不出来。
 export const CHANNEL_PROBE_SEGMENT_TIMEOUT_MS = 4000; // 分片单独计时，不吃整条 5 秒预算
 export const CHANNEL_PROBE_SEGMENT_BYTES = 8192;      // 读到 8KB 就认为「确实在出数据」
-export const CHANNEL_PROBE_SEGMENT_MIN_BYTES = 2000;  // 低于 2KB 视为无效（多为错误页）
+export const CHANNEL_PROBE_SEGMENT_MIN_BYTES = 8192;  // 低于 8KB 视为无效（多为错误页/空响应）
+/** 分片持续吞吐下限（KB/s）：低于这个值意味着能开头、播不动，电视端照样卡 */
+export const CHANNEL_PROBE_SEGMENT_MIN_KBPS = 100;
 // 缓存过期（6 小时）：过期即重测，保证排序不会基于一周前的数据
 export const CHANNEL_SPEED_TTL_MS = 6 * 60 * 60 * 1000; // 成功源的常规回测间隔
 /** 确认死链的回测间隔：撞一次要等满超时，没必要和好源一样勤 */
@@ -128,8 +131,9 @@ export const CHANNEL_DEAD_RECHECK_MS = 24 * 60 * 60 * 1000;
  * 缓存条目会带着生成它的版本号，旧条目各自重测一次，之后自动回到增量回测。
  * 规则升级因此不需要人肉清空整张缓存表。
  */
+// 4 = 分片读 64KB 并校验吞吐（3 只读 8KB，误判了大量「能开头、播不动」的源）
 // 3 = 按内容识别播放列表 + 分片复验（2 是只按 .m3u8 扩展名识别）
-export const CHANNEL_PROBE_RULE_VERSION = 3;
+export const CHANNEL_PROBE_RULE_VERSION = 4;
 // 连续失败多少轮后判定为「死链」（排到该频道末尾，不直接删除）
 export const CHANNEL_DEAD_FAILS = 2;
 /** 域名去相关：一个频道的前 N 条源尽量来自不同 host（同 host 只出现一次） */
