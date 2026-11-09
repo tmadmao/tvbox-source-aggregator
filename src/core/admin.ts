@@ -485,6 +485,9 @@ ${sharedStyles}
   <div class="tab-panel" id="panelChannels">
     <div class="section">
       <div class="section-title" data-i18n="channelsTitle">频道与源</div>
+      <div style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:8px" data-i18n="channelsCurationHint">
+        央视 / 卫视 / 南京地方台已按编排自动排序；「置顶」把频道提到组首，「禁用」从输出里移除（可撤销）。
+      </div>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
         <label style="display:flex;align-items:center;gap:6px;font-size:0.82rem">
           <span data-i18n="channelsTopN">每台保留</span>
@@ -931,6 +934,7 @@ const translations = {
     tabChannels:'Channels',
     tabHealth:'Source Health',
     channelsTitle:'Channels & Sources',
+    channelsCurationHint:'CCTV / Satellite / Nanjing locals are auto-ordered. "Pin" moves a channel to the top of its group; "Disable" removes it from the output (reversible).',
     channelsTopN:'keep', channelsTopNUnit:'sources per channel',
     channelsOptimize:'Optimize',
     channelsOptimizeConfirm:'Keep only the top {n} sources per channel?',
@@ -945,7 +949,7 @@ const translations = {
     channelOrderSmart:'Smart sort (CCTV)',
     channelOrderSave:'Save order',
     channelOrderReset:'Reset',
-    channelOrderHint:'Drag to reorder. The first item is what the TV shows first.',
+    channelOrderHint:'CCTV / Satellite / Local are auto-ordered by channel curation (Nanjing locals pinned to the top). Dragging here only affects other groups.',
     channelOrderEmpty:'No channels. Run aggregation first.',
     channelOrderNeedRefresh:'Run aggregation first',
     channelOrderDirty:'Unsaved changes',
@@ -1076,6 +1080,7 @@ const translations = {
     tabChannels:'频道',
     tabHealth:'源健康',
     channelsTitle:'频道与源',
+    channelsCurationHint:'央视 / 卫视 / 南京地方台已按编排自动排序；「置顶」把频道提到组首，「禁用」从输出里移除（可撤销）。',
     channelsTopN:'每台保留', channelsTopNUnit:'条源',
     channelsOptimize:'一键选优',
     channelsOptimizeConfirm:'每台只保留前 {n} 条源？',
@@ -1090,7 +1095,7 @@ const translations = {
     channelOrderSmart:'一键智能排序（央视）',
     channelOrderSave:'保存排序',
     channelOrderReset:'恢复默认',
-    channelOrderHint:'拖动频道调整顺序，第一位就是电视上显示的第一个。',
+    channelOrderHint:'央视 / 卫视 / 境内地方 由「频道编排」自动排序（卫视居前、南京地方台置顶），这里拖动只对其余分组生效。',
     channelOrderEmpty:'暂无频道，请先执行一次聚合',
     channelOrderNeedRefresh:'请先执行一次聚合',
     channelOrderDirty:'有未保存的调整',
@@ -2155,8 +2160,12 @@ function renderChannelTable() {
     }).join('');
     return '<details style="border-bottom:1px solid var(--border)">' +
       '<summary style="display:flex;gap:10px;align-items:center;padding:6px 8px;cursor:pointer;font-size:.82rem">' +
-      '<span style="min-width:130px">' + esc(ch.name) + '</span>' +
+      '<span style="min-width:130px">' + esc(ch.name) +
+      (ch.pinned ? ' <b style="color:var(--accent,#378ADD);font-size:.7rem">顶</b>' : '') +
+      (ch.disabled ? ' <b style="color:var(--danger,#A32D2D);font-size:.7rem">停</b>' : '') + '</span>' +
       '<span style="min-width:80px;color:var(--text-secondary);font-size:.72rem">' + esc(ch.id || '-') + '</span>' +
+      '<a href="javascript:void(0)" data-name="' + esc(ch.name) + '" data-flag="pinned" onclick="toggleOverride(this)" style="font-size:.7rem;color:var(--text-secondary);white-space:nowrap">' + (ch.pinned ? '取消置顶' : '置顶') + '</a>' +
+      '<a href="javascript:void(0)" data-name="' + esc(ch.name) + '" data-flag="disabled" onclick="toggleOverride(this)" style="font-size:.7rem;color:var(--text-secondary);white-space:nowrap">' + (ch.disabled ? '启用' : '禁用') + '</a>' +
       '<span style="min-width:46px;color:var(--text-secondary)">' + (ch.urls || []).length + ' 源</span>' +
       '<span style="min-width:60px">' + (first.kind === 'fail' ? '-' : (first.speedMs + 'ms')) + '</span>' +
       '<span style="min-width:52px">' + tierBadge(h) + '</span>' +
@@ -2170,11 +2179,64 @@ function renderUnmapped() {
   const box = $('unmappedList');
   if (!box || !channelsData) return;
   const list = channelsData.unmapped || [];
+  channelUnmappedList = list;
   if (!list.length) { box.innerHTML = '<span style="color:var(--text-secondary)">没有未识别频道</span>'; return; }
-  box.innerHTML = list.slice(0, 200).map(function (u) {
-    return '<div style="padding:3px 0;border-bottom:1px solid var(--border)">' +
-      esc(u.name) + ' <span style="color:var(--text-secondary);font-size:.72rem">' + esc(u.group) + ' · ' + u.urls + ' 源</span></div>';
-  }).join('');
+
+  // 目标频道候选：把当前树里所有「有 id 的频道」放进 datalist，输入时自动补全
+  const optSeen = {};
+  const options = [];
+  (channelsData.groups || []).forEach(function (g) {
+    (g.channels || []).forEach(function (ch) {
+      if (!ch.id || optSeen[ch.id]) return;
+      optSeen[ch.id] = 1;
+      options.push('<option value="' + esc(ch.id) + '">' + esc(ch.name) + ' · ' + esc(g.group) + '</option>');
+    });
+  });
+
+  box.innerHTML = list.slice(0, 200).map(function (u, i) {
+    return '<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border)">' +
+      '<span style="flex:1;min-width:120px">' + esc(u.name) +
+      ' <span style="color:var(--text-secondary);font-size:.72rem">' + esc(u.group) + ' · ' + u.urls + ' 源</span></span>' +
+      '<input id="unmappedTarget' + i + '" list="chIdList" placeholder="目标频道 id" style="width:180px;padding:3px 6px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);font-size:.75rem">' +
+      '<button class="btn btn-sm" data-idx="' + i + '" onclick="assignUnmapped(this.dataset.idx)">归入</button>' +
+      '<a href="javascript:void(0)" data-name="' + esc(u.name) + '" data-flag="disabled" onclick="toggleOverride(this)" style="font-size:.72rem;color:var(--danger,#A32D2D);white-space:nowrap">忽略</a>' +
+      '</div>';
+  }).join('') + '<datalist id="chIdList">' + options.join('') + '</datalist>';
+}
+
+let channelUnmappedList = [];
+
+async function assignUnmapped(idx) {
+  const u = channelUnmappedList[Number(idx)];
+  const input = $('unmappedTarget' + idx);
+  if (!u || !input || !input.value.trim()) return;
+  try {
+    const res = await auth.authFetch('/admin/channels/assign', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: u.name, id: input.value.trim() }),
+    });
+    if (res.ok) { input.value = '✓'; setTimeout(loadChannels, 600); }
+    else { const d = await res.json().catch(function () { return {}; }); input.value = d.error || '失败'; }
+  } catch (e) { input.value = t('networkError'); }
+}
+
+/** 置顶 / 禁用 / 忽略：三处按钮共用，data-flag 决定动作 */
+async function toggleOverride(el) {
+  const name = el.dataset.name;
+  const flag = el.dataset.flag;
+  if (!name || !flag) return;
+  // 当前状态从行内文本反推（按钮文字就是开关状态）
+  const on = (flag === 'disabled') ? (el.textContent === '启用') : (el.textContent === '取消置顶');
+  const body = { name: name };
+  body[flag] = !on;
+  // 禁用时顺手取消置顶，避免「既置顶又禁用」的脏状态
+  if (flag === 'disabled' && !on) body.pinned = false;
+  try {
+    const res = await auth.authFetch('/admin/channels/override', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (res.ok) setTimeout(loadChannels, 400);
+  } catch (e) { /* ignore */ }
 }
 
 async function optimizeChannels() {

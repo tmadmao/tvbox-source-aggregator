@@ -1,7 +1,7 @@
 // 频道目录与源管理接口（固化框架）
 //
-// 只做框架：读取频道树 + 目录、一键选优（top N）、删除源、未识别队列、人工归入。
-// 置顶/禁用留给下一轮（需要 overrides 的排序插槽），接口先不假装支持。
+// 读取频道树 + 目录、一键选优（top N）、删除源、未识别队列、人工归入、置顶/禁用。
+// 置顶/禁用通过 overrides 落盘，聚合时由 channel-curation 套用（见 aggregator Step 6.7b）。
 
 import type { Hono } from 'hono';
 import type { Storage } from '../storage/interface';
@@ -11,9 +11,10 @@ import {
   KV_LIVE_TOP_N,
 } from '../core/config';
 import { loadSpeedMap } from '../core/channel-probe';
-import { loadRegistry, saveRegistry, upsertFromGroups, findUnmapped, assignAlias } from '../core/channel-registry';
+import { loadRegistry, saveRegistry, upsertFromGroups, findUnmapped, assignAlias, normalizeKey } from '../core/channel-registry';
 import { snapshotOf } from '../core/source-health';
 import { addDeadUrls } from '../core/live-deadlist';
+import { loadOverrides, saveOverrides, setOverride, overrideOf, isProtectedUrl } from '../core/channel-curation';
 import { bareUrl } from '../core/live-url';
 import { trimGroupsToTopN } from '../core/live-url';
 
@@ -56,6 +57,7 @@ export function mountChannelRoutes(app: Hono, deps: ChannelRouteDeps): void {
     const lives = await loadLives(storage);
     const speed = await loadSpeedMap(storage);
     const reg = await loadRegistry(storage);
+    const overrides = await loadOverrides(storage);
 
     // 首次访问时用当前树初始化目录
     if (Object.keys(reg.channels).length === 0 && lives.length > 0) {
@@ -67,9 +69,12 @@ export function mountChannelRoutes(app: Hono, deps: ChannelRouteDeps): void {
       group: g.group,
       channels: (g.channels || []).map((ch) => {
         const id = reg.byName[String(ch.name).trim().toUpperCase()] || null;
+        const ov = overrideOf(overrides, ch.name);
         return {
           name: ch.name,
           id,
+          pinned: !!ov?.pinned,
+          disabled: !!ov?.disabled,
           urls: (ch.urls || []).map((raw) => {
             const { url, source } = splitUrl(raw);
             const entry = speed[url];
@@ -78,6 +83,7 @@ export function mountChannelRoutes(app: Hono, deps: ChannelRouteDeps): void {
               speedMs: entry?.kind === 'fail' ? 0 : (entry?.speedMs ?? 0),
               kind: entry?.kind ?? 'untested',
               note: entry?.note,
+              protected: isProtectedUrl(url),
               health: snapshotOf(entry),
             };
           }),
@@ -85,12 +91,48 @@ export function mountChannelRoutes(app: Hono, deps: ChannelRouteDeps): void {
       }),
     }));
 
+    // 被「禁用」的频道不会出现在输出里，这里按目录补回占位行，
+    // 否则禁用之后在后台就找不到它、没法撤销了。
+    const disabledKeys = Object.entries(overrides)
+      .filter(([, v]) => v?.disabled)
+      .map(([k]) => k);
+    if (disabledKeys.length > 0) {
+      const present = new Set(groups.flatMap((g) => g.channels.map((ch) => normalizeKey(ch.name))));
+      for (const rec of Object.values(reg.channels)) {
+        const k = normalizeKey(rec.name);
+        if (!disabledKeys.includes(k) || present.has(k)) continue;
+        let target = groups.find((g) => g.group === rec.group);
+        if (!target) { target = { group: rec.group, channels: [] }; groups.push(target); }
+        target.channels.push({ name: rec.name, id: rec.id, pinned: false, disabled: true, urls: [] });
+      }
+    }
+
     return c.json({
       groups,
-      unmapped: findUnmapped(reg, lives),
+      // 「忽略」过的名字不再进未识别队列（override.disabled 兼作忽略标记）
+      unmapped: findUnmapped(reg, lives).filter((u) => !overrides[normalizeKey(u.name)]?.disabled),
+      overrides,
       registrySize: Object.keys(reg.channels).length,
       initializedAt: reg.initializedAt,
     });
+  });
+
+  // POST /admin/channels/override — 置顶 / 禁用（可撤销）
+  app.post('/admin/channels/override', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    const body = await c.req.json<{ name?: string; pinned?: boolean; disabled?: boolean }>();
+    if (!body.name) return c.json({ error: 'name 必填' }, 400);
+    if (body.pinned === undefined && body.disabled === undefined) {
+      return c.json({ error: 'pinned 与 disabled 至少给一个' }, 400);
+    }
+    const map = await loadOverrides(storage);
+    const next = setOverride(map, body.name, {
+      ...(body.pinned === undefined ? {} : { pinned: body.pinned }),
+      ...(body.disabled === undefined ? {} : { disabled: body.disabled }),
+    });
+    await saveOverrides(storage, next);
+    if (triggerRefresh) triggerRefresh().catch(() => {});
+    return c.json({ success: true, overrides: next });
   });
 
   // GET /admin/channels/unmapped — 未识别队列

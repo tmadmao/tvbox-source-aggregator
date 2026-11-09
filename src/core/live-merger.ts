@@ -6,8 +6,8 @@ import type {
   TVBoxLiveChannel,
   ChannelSpeedMap,
 } from './types';
-import { TVBOX_UA, BROWSER_UA } from './config';
-import { splitUrlSource, bareUrl, joinUrlSource, compareBySpeed } from './live-url';
+import { TVBOX_UA, BROWSER_UA, CHANNEL_HOST_DIVERSIFY } from './config';
+import { splitUrlSource, bareUrl, joinUrlSource, compareBySpeed, diversifyByHost } from './live-url';
 import { normalizeGroupName, groupPriority, type LiveGroupMergeConfig } from './live-groups';
 import { isShoppingChannel, type ShoppingFilterConfig } from './live-filters';
 
@@ -307,6 +307,8 @@ export interface MergeLivesResult {
   totalUrls: number;
   sourcesDownloaded: number;
   sourcesFailed: number;
+  /** 前 3 条原本同域名、被重新错开的频道数（观测用） */
+  diversifiedChannels?: number;
 }
 
 export interface LiveMergeOptions {
@@ -411,10 +413,14 @@ export async function mergeLivesToNative(
   // 按 group 组织
   const groupMap = new Map<string, TVBoxLiveChannel[]>();
   let totalUrls = 0;
+  let diversifiedChannels = 0; // 做过域名去相关（前 3 条原本同域名）的频道数
 
   for (const [, agg] of channelMap) {
     // 对 urls 排序：最快的排第一（这是「选优」的核心）
-    const urlList = Array.from(agg.urls.values()).sort((a, b) => compareBySpeed(a, b, channelSpeedMap));
+    const sortedUrls = Array.from(agg.urls.values()).sort((a, b) => compareBySpeed(a, b, channelSpeedMap));
+    // 再做域名去相关：前 3 条不要挤在同一个域名，否则该域名一抖就连挂三次
+    const urlList = diversifyByHost(sortedUrls, CHANNEL_HOST_DIVERSIFY);
+    if (urlList.some((u, i) => u !== sortedUrls[i])) diversifiedChannels++;
 
     // 拼 $ 源名（URL 预防性 encode 避免 type 泄漏）
     const urlStrs = urlList.map((e) => joinUrlSource(scrubUrlType(e.url), scrubTypeLiteral(e.source)));
@@ -478,6 +484,7 @@ export async function mergeLivesToNative(
       totalUrls,
       sourcesDownloaded,
       sourcesFailed,
+      diversifiedChannels,
     };
   }
 
@@ -488,6 +495,7 @@ export async function mergeLivesToNative(
       totalUrls,
       sourcesDownloaded,
       sourcesFailed,
+      diversifiedChannels,
     };
   }
 
@@ -501,6 +509,7 @@ export async function mergeLivesToNative(
     totalUrls,
     sourcesDownloaded,
     sourcesFailed,
+    diversifiedChannels,
   };
 }
 
@@ -563,7 +572,8 @@ export async function separatedMergeLives(
         const chs: TVBoxLiveChannel[] = [];
         for (const [, agg] of channels) {
           // 同一份 txt 里也要按测速排序，否则默认（按源分开）模式下测速等于白跑
-          const list = Array.from(agg.urls.values()).sort((a, b) => compareBySpeed(a, b, channelSpeedMap));
+          const sorted = Array.from(agg.urls.values()).sort((a, b) => compareBySpeed(a, b, channelSpeedMap));
+          const list = diversifyByHost(sorted, CHANNEL_HOST_DIVERSIFY);
           const urlStrs = list.map((e) => joinUrlSource(scrubUrlType(e.url), scrubTypeLiteral(e.source)));
           chs.push({ name: scrubTypeLiteral(agg.rawName), urls: urlStrs });
           totalUrls += urlStrs.length;

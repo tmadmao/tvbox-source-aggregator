@@ -18,6 +18,30 @@ export interface ReverifyOptions {
   concurrency?: number;
   /** 同一域名同时最多几条，默认 4（单 IP 挂几百条的源很常见，别把它打崩） */
   perHost?: number;
+  /** 整轮复核的时间预算（毫秒），超时就收工，默认 8 分钟 */
+  budgetMs?: number;
+}
+
+/**
+ * 单条探测的硬超时。
+ *
+ * `probeUrlOnce` 内部有 5s AbortController，但实测出现过「信号发了、连接不回收」
+ * 的僵死：24 个 worker 全卡在同一批 socket 上，CPU 与网络 I/O 都归零，
+ * 整轮聚合就停在这一步（日志停 20 分钟不动）。这里加一层 Promise.race 兜底，
+ * 保证 worker 一定会被放回去 —— 排序退化成「维持原序」也比整轮卡死强。
+ */
+const PROBE_HARD_TIMEOUT_MS = 12000;
+
+async function raceTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  try {
+    return await Promise.race([p, guard]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export interface ReverifyStats {
@@ -84,7 +108,9 @@ export async function reverifyHeadSources(
   const headCount = Math.max(1, opts.headCount ?? 3);
   const concurrency = Math.max(1, opts.concurrency ?? 24);
   const perHost = Math.max(1, opts.perHost ?? 4);
+  const budgetMs = Math.max(10_000, opts.budgetMs ?? 8 * 60 * 1000);
   const started = Date.now();
+  const deadline = started + budgetMs;
 
   const stats: ReverifyStats = { checked: 0, promoted: 0, allDead: 0, requests: 0, elapsedMs: 0 };
   const gate: HostGate = { counts: new Map(), waiters: new Map() };
@@ -107,6 +133,7 @@ export async function reverifyHeadSources(
   let cursor = 0;
   async function worker(): Promise<void> {
     while (cursor < tasks.length) {
+      if (Date.now() > deadline) return;   // 预算用完就收工，不再开新频道
       const task = tasks[cursor++];
       const urls = task.urls;
       if (urls.length === 0) continue;
@@ -118,11 +145,15 @@ export async function reverifyHeadSources(
         if (!bare) continue;
         const host = hostOf(bare);
         await acquire(gate, host, perHost);
-        let r: Awaited<ReturnType<typeof probeUrlOnce>>;
+        let r: Awaited<ReturnType<typeof probeUrlOnce>> | null = null;
         try {
-          r = await probeUrlOnce(bare);
+          r = await raceTimeout(probeUrlOnce(bare), PROBE_HARD_TIMEOUT_MS);
         } finally {
           release(gate, host);
+        }
+        if (!r) {
+          // 硬超时：记一次失败，别让这台的判定永远悬着
+          r = { speedMs: 0, kind: 'fail', timedOut: true, note: 'hard-timeout' } as Awaited<ReturnType<typeof probeUrlOnce>>;
         }
         applyResult(bare, r);
         if (r.kind !== 'fail') {

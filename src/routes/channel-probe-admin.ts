@@ -10,6 +10,7 @@ import {
   loadSpeedMap,
   runChannelProbe,
   isRunning,
+  clearSpeedMap,
 } from '../core/channel-probe';
 import { addDeadUrls, loadDeadUrls, clearDeadUrls } from '../core/live-deadlist';
 
@@ -72,6 +73,27 @@ export function mountChannelProbeRoutes(app: Hono, deps: ChannelProbeRouteDeps):
     const body = await c.req.json<{ enabled: boolean }>();
     await storage.put('channel_probe_inline', body.enabled ? 'true' : 'false');
     return c.json({ success: true, enabled: body.enabled });
+  });
+
+  // GET / PUT /admin/channel-probe/segment — L2 分片复验开关
+  app.get('/admin/channel-probe/segment', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    return c.json({ enabled: (await storage.get('channel_probe_segment')) !== 'false' });
+  });
+
+  app.put('/admin/channel-probe/segment', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    const body = await c.req.json<{ enabled: boolean }>();
+    await storage.put('channel_probe_segment', body.enabled ? 'true' : 'false');
+    return c.json({ success: true, enabled: body.enabled });
+  });
+
+  // POST /admin/channel-probe/clear-cache — 清空测速缓存，强制下轮全量重测
+  app.post('/admin/channel-probe/clear-cache', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    if (isRunning()) return c.json({ success: false, error: '测速进行中，请稍后再清' });
+    const cleared = await clearSpeedMap(storage);
+    return c.json({ success: true, cleared });
   });
 
   // POST /admin/channel-probe/trigger — 手动触发（异步启动，不阻塞响应）

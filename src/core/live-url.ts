@@ -8,6 +8,10 @@
 
 import type { ChannelSpeedEntry, ChannelSpeedMap } from './types';
 import { CHANNEL_DEAD_FAILS } from './config';
+import { tierOf, scoreOf } from './source-health';
+
+/** 健康分差距阈值：小于这个差距仍按延迟排，避免把「快 50ms」的稳定源换掉 */
+const HEALTH_SCORE_GAP = 0.12;
 
 export interface SplitResult {
   url: string;
@@ -53,7 +57,7 @@ export function rankOf(entry: ChannelSpeedEntry | undefined): number {
   return (entry.fails ?? 1) >= CHANNEL_DEAD_FAILS ? DEAD_RANK : 2;
 }
 
-/** 按测速结果排序：可用按中位延迟升序，其余按档位排序 */
+/** 按测速结果排序：先看健康档位，再看健康分，最后按中位延迟升序 */
 export function compareBySpeed<T extends { url: string; sourceSpeedMs?: number }>(
   a: T,
   b: T,
@@ -66,7 +70,19 @@ export function compareBySpeed<T extends { url: string; sourceSpeedMs?: number }
   if (ra !== rb) return ra - rb;
 
   if (ra === 0 && ea && eb) {
+    // 健康分接入排序：连续掉线的源（tier 2）不该只因为这一次探得快点就排第一，
+    // 电视端一挂就是几十秒黑屏，比慢 300ms 难受得多。
+    const ta = tierOf(ea);
+    const tb = tierOf(eb);
+    if (ta !== tb) return ta - tb;
+
     const d = ea.speedMs - eb.speedMs;
+
+    // 健康分差距明显时压过速度，差距小（同档同速）时仍按延迟排
+    const sa = scoreOf(ea);
+    const sb = scoreOf(eb);
+    if (Math.abs(sa - sb) >= HEALTH_SCORE_GAP) return sb - sa;
+
     if (d !== 0) return d;
   }
 

@@ -8,6 +8,7 @@
 
 import type { Storage } from '../storage/interface';
 import { KV_LIVE_DEAD_URLS } from './config';
+import { isProtectedUrl } from './channel-curation';
 
 const MAX_ENTRIES = 300000;
 
@@ -27,14 +28,30 @@ async function saveDeadUrls(storage: Storage, urls: string[]): Promise<void> {
   await storage.put(KV_LIVE_DEAD_URLS, JSON.stringify(unique));
 }
 
-/** 追加一批死链（幂等） */
+/** 追加一批死链（幂等）。受保护域名一律跳过，防止误杀重点频道的官方源。 */
 export async function addDeadUrls(storage: Storage, urls: string[]): Promise<number> {
   if (urls.length === 0) return 0;
+  const safe = urls.filter((u) => !isProtectedUrl(u));
+  if (safe.length === 0) return 0;
   const existing = new Set(await loadDeadUrls(storage));
   const before = existing.size;
-  for (const u of urls) existing.add(u);
+  for (const u of safe) existing.add(u);
   await saveDeadUrls(storage, Array.from(existing));
   return existing.size - before;
+}
+
+/**
+ * 把受保护域名从黑名单里回捞出来（历史误判的补救）。
+ * 老版本没有保护机制，「清理死源」曾把 nklive.nbs.cn 整段写进黑名单，
+ * 导致南京地方台整组消失；这里在每次聚合前顺手清理一次。
+ */
+export async function purgeProtectedUrls(storage: Storage): Promise<number> {
+  const existing = await loadDeadUrls(storage);
+  if (existing.length === 0) return 0;
+  const next = existing.filter((u) => !isProtectedUrl(u));
+  const removed = existing.length - next.length;
+  if (removed > 0) await saveDeadUrls(storage, next);
+  return removed;
 }
 
 /** 把已恢复的 URL 移出黑名单（测速侧调用） */

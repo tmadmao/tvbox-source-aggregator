@@ -8,11 +8,12 @@ import { batchSiteSpeedTest, appendSpeedToName, filterUnreachableSites, type Sit
 import { macCMSToTVBoxSites, processMacCMSForLocal } from './core/maccms';
 import { rewriteJarUrls } from './core/jar-proxy';
 import { mergeLivesToNative, separatedMergeLives, formatLiveGroupsAsTxt, type LiveSourceInput } from './core/live-merger';
-import { loadDeadUrls } from './core/live-deadlist';
+import { loadDeadUrls, purgeProtectedUrls } from './core/live-deadlist';
 import { reverifyHeadSources } from './core/live-verify';
 import { withProbeNet } from './core/probe-net';
 import { trimGroupsToTopN } from './core/live-url';
 import { loadChannelOrder, applyChannelOrder } from './core/live-order';
+import { loadOverrides, curateGroups, isFocusChannel } from './core/channel-curation';
 import { loadLiveGroupMerge } from './core/live-groups';
 import { loadShoppingFilter } from './core/live-filters';
 import { loadFtpConfig, uploadLiveTxt } from './core/ftp-sync';
@@ -530,12 +531,18 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   // Step 6.6: 死源黑名单过滤（管理后台「清理死源」按钮写入）
   // 只过滤输出，不影响测速：测速仍按完整频道树跑，源恢复后会自动移出黑名单
   if (Array.isArray(merged.lives) && merged.lives.length > 0) {
+    // 先把受保护域名（南京广电官方源等）从黑名单里回捞，避免历史误判继续吃台
+    const revivedProtected = await purgeProtectedUrls(storage);
+    if (revivedProtected > 0) {
+      logger.infoFields('aggregation', 'dead-list-protected-revived', { urls: revivedProtected });
+    }
     const deadUrls = await loadDeadUrls(storage);
     if (deadUrls.length > 0) {
       const deadSet = new Set(deadUrls);
       const keptGroups: typeof merged.lives = [];
       let droppedUrls = 0;
       let droppedChannels = 0;
+      let exemptChannels = 0;
 
       for (const group of merged.lives as Array<{ group?: string; channels?: Array<{ name: string; urls: string[] }> }>) {
         if (!Array.isArray(group.channels)) {
@@ -544,6 +551,13 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
         }
         const channels: Array<{ name: string; urls: string[] }> = [];
         for (const ch of group.channels) {
+          // 重点频道（央视/卫视/南京）不吃黑名单：它们的源少，命中一次就整台消失，
+          // 而用户打开电视找的就是这几个台。死链仍会排到末尾。
+          if (isFocusChannel(ch.name)) {
+            channels.push(ch);
+            exemptChannels++;
+            continue;
+          }
           const kept = (ch.urls || []).filter((u) => !deadSet.has(bareUrl(u)));
           droppedUrls += (ch.urls || []).length - kept.length;
           if (kept.length > 0) channels.push({ ...ch, urls: kept });
@@ -554,7 +568,7 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
 
       merged.lives = keptGroups;
       logger.infoFields('aggregation', 'dead-list-filtered', {
-        deadList: deadUrls.length, droppedUrls, droppedChannels, leftGroups: keptGroups.length,
+        deadList: deadUrls.length, droppedUrls, droppedChannels, exemptChannels, leftGroups: keptGroups.length,
       });
     }
   }
@@ -596,6 +610,19 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
       merged.lives = applyChannelOrder(merged.lives as never, orderConfig) as never;
       logger.infoFields('aggregation', 'channel-order-applied', { groups: Object.keys(orderConfig.groups).length });
     }
+  }
+
+  // Step 6.7b: 重点频道编排（央视 / 卫视 / 南京地方台）
+  // 放在自定义顺序之后：编排是「按台的重要性算出来的规则」，优先级高于一次性拖动结果，
+  // 否则源里一冒出新写法就永远沉在组尾（南京那批台就是这样消失的）。
+  if (Array.isArray(merged.lives) && merged.lives.length > 0) {
+    const overrides = await loadOverrides(storage);
+    const curated = curateGroups(merged.lives as never, overrides);
+    merged.lives = curated.groups as never;
+    logger.infoFields('aggregation', 'channel-curated', {
+      mergedDupes: curated.mergedDupes, disabled: curated.disabled,
+      pinned: Object.values(overrides).filter((o) => o?.pinned).length,
+    });
   }
 
   // Step 6.8: 自定义分组排序
