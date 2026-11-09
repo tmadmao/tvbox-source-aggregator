@@ -9,7 +9,7 @@
 //   其它分组（港澳台、体育、专题…）用户明确说不看，不值得花力气排队。
 
 import type { Storage } from '../storage/interface';
-import type { TVBoxLiveChannel, TVBoxLiveGroup } from './types';
+import type { ChannelSpeedMap, TVBoxLiveChannel, TVBoxLiveGroup } from './types';
 import { KV_LIVE_CHANNEL_OVERRIDES } from './config';
 import { parseCctvRank } from './live-order';
 import { bareUrl } from './live-url';
@@ -342,7 +342,11 @@ function sortOnly(group: string, chans: TVBoxLiveChannel[]): TVBoxLiveChannel[] 
     .map((x) => x.ch);
 }
 
-export function curateGroups(groups: TVBoxLiveGroup[], overrides: OverrideMap = {}): CurateResult {
+export function curateGroups(
+  groups: TVBoxLiveGroup[],
+  overrides: OverrideMap = {},
+  speedMap?: ChannelSpeedMap,
+): CurateResult {
   let renamed = 0;
   let mergedDupes = 0;
   let disabled = 0;
@@ -407,6 +411,23 @@ export function curateGroups(groups: TVBoxLiveGroup[], overrides: OverrideMap = 
       else rest.push(ch);
     }
     chans = [...pinned, ...rest];
+
+    // 全死的台沉到组尾：编排管的是「打开电视先看到哪个台」，
+    // 一个源都放不出来的台占着第 6 位只会让人以为整套源坏了。
+    // 不删除：源修好后下一轮它会自动回到编排位置；人工置顶的照旧留在最前。
+    if (speedMap && (group === '央视' || group === '卫视' || group === '境内地方')) {
+      const head = chans.slice(0, pinned.length);
+      const alive: TVBoxLiveChannel[] = [];
+      const dead: TVBoxLiveChannel[] = [];
+      for (const ch of chans.slice(pinned.length)) {
+        const playable = (ch.urls || []).some((u) => {
+          const entry = speedMap[bareUrl(u)];
+          return !entry || entry.kind !== 'fail';
+        });
+        (playable ? alive : dead).push(ch);
+      }
+      if (dead.length > 0) chans = [...head, ...alive, ...dead];
+    }
 
     if (chans.length > 0) out.push({ group, channels: chans });
   }

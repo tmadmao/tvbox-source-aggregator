@@ -14,6 +14,7 @@ import { withProbeNet } from './core/probe-net';
 import { trimGroupsToTopN } from './core/live-url';
 import { loadChannelOrder, applyChannelOrder } from './core/live-order';
 import { loadOverrides, curateGroups, isFocusChannel } from './core/channel-curation';
+import { loadRegistry, saveRegistry, upsertFromGroups } from './core/channel-registry';
 import { loadLiveGroupMerge } from './core/live-groups';
 import { loadShoppingFilter } from './core/live-filters';
 import { loadFtpConfig, uploadLiveTxt } from './core/ftp-sync';
@@ -617,12 +618,26 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   // 否则源里一冒出新写法就永远沉在组尾（南京那批台就是这样消失的）。
   if (Array.isArray(merged.lives) && merged.lives.length > 0) {
     const overrides = await loadOverrides(storage);
-    const curated = curateGroups(merged.lives as never, overrides);
+    const curateSpeedMap = await loadChannelSpeedMap(storage);
+    const curated = curateGroups(merged.lives as never, overrides, curateSpeedMap);
     merged.lives = curated.groups as never;
     logger.infoFields('aggregation', 'channel-curated', {
-      mergedDupes: curated.mergedDupes, disabled: curated.disabled,
+      mergedDupes: curated.mergedDupes, disabled: curated.disabled, rescued: curated.rescued,
       pinned: Object.values(overrides).filter((o) => o?.pinned).length,
     });
+
+    // 编排会把频道改成正式名（江苏·南京新闻 → 南京新闻综合），目录要跟着补槽，
+    // 否则后台看到的 id 是空的、未识别队列里全是刚改好名的频道。
+    try {
+      const reg = await loadRegistry(storage);
+      const { added } = upsertFromGroups(reg, curated.groups);
+      if (added > 0) {
+        await saveRegistry(storage, reg);
+        logger.infoFields('aggregation', 'registry-synced', { added });
+      }
+    } catch (err) {
+      logger.warn('aggregation', `registry sync failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // Step 6.8: 自定义分组排序

@@ -10,7 +10,7 @@ import {
   KV_MERGED_CONFIG,
   KV_LIVE_TOP_N,
 } from '../core/config';
-import { loadSpeedMap } from '../core/channel-probe';
+import { loadSpeedMap, saveSpeedMap } from '../core/channel-probe';
 import { loadRegistry, saveRegistry, upsertFromGroups, findUnmapped, assignAlias, normalizeKey } from '../core/channel-registry';
 import { snapshotOf } from '../core/source-health';
 import { addDeadUrls } from '../core/live-deadlist';
@@ -153,6 +153,30 @@ export function mountChannelRoutes(app: Hono, deps: ChannelRouteDeps): void {
     if (!ok) return c.json({ error: '频道不存在' }, 404);
     await saveRegistry(storage, reg);
     return c.json({ success: true });
+  });
+
+  // POST /admin/channels/reprobe — 指定频道立刻重测（清掉它们的测速缓存）
+  // 用途：重点频道曾被误判成死链，但死链 24 小时内不重测，会一直排不了第一。
+  app.post('/admin/channels/reprobe', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    const body = await c.req.json<{ names?: string[] }>();
+    const names = new Set((body.names || []).map((n) => String(n).trim()).filter(Boolean));
+    if (names.size === 0) return c.json({ error: 'names 必填' }, 400);
+
+    const lives = await loadLives(storage);
+    const map = await loadSpeedMap(storage);
+    let removed = 0;
+    for (const g of lives) {
+      for (const ch of g.channels || []) {
+        if (!names.has(String(ch.name).trim())) continue;
+        for (const raw of ch.urls || []) {
+          const u = bareUrl(raw);
+          if (map[u]) { delete map[u]; removed++; }
+        }
+      }
+    }
+    if (removed > 0) await saveSpeedMap(storage, map);
+    return c.json({ success: true, removed });
   });
 
   // POST /admin/channels/optimize — 一键选优：每台保留 top N
