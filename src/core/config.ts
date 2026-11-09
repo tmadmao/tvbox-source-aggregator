@@ -112,7 +112,26 @@ export const CHANNEL_PROBE_TIMEOUT_MS = 5000;
 export const CHANNEL_PROBE_SAMPLES = 2;
 // 单轮测速预算：超时后剩余 URL 留给下一轮（避免 1.6 万 URL 一次跑不完）
 export const CHANNEL_PROBE_BUDGET_MS = 20 * 60 * 1000;
+
+// ─── L2 分片复验 ────────────────────────────────────────
+// 播放列表只是一个文本清单，由 CDN 静态返回；真正的分片可能指向另一台已失效的源站。
+// 实测：排第一的源里 23% 是「列表 200 但分片 404/超时」，光看 #EXTM3U 判不出来。
+export const CHANNEL_PROBE_SEGMENT_TIMEOUT_MS = 4000; // 分片单独计时，不吃整条 5 秒预算
+export const CHANNEL_PROBE_SEGMENT_BYTES = 8192;      // 读到 8KB 就认为「确实在出数据」
+export const CHANNEL_PROBE_SEGMENT_MIN_BYTES = 2000;  // 低于 2KB 视为无效（多为错误页）
 // 缓存过期（6 小时）：过期即重测，保证排序不会基于一周前的数据
-export const CHANNEL_SPEED_TTL_MS = 6 * 60 * 60 * 1000;
+export const CHANNEL_SPEED_TTL_MS = 6 * 60 * 60 * 1000; // 成功源的常规回测间隔
+/** 确认死链的回测间隔：撞一次要等满超时，没必要和好源一样勤 */
+export const CHANNEL_DEAD_RECHECK_MS = 24 * 60 * 60 * 1000;
+/**
+ * 判定规则版本。改动判定逻辑（加 L2 分片复验、改阈值等）就 +1：
+ * 缓存条目会带着生成它的版本号，旧条目各自重测一次，之后自动回到增量回测。
+ * 规则升级因此不需要人肉清空整张缓存表。
+ */
+// 3 = 按内容识别播放列表 + 分片复验（2 是只按 .m3u8 扩展名识别）
+export const CHANNEL_PROBE_RULE_VERSION = 3;
 // 连续失败多少轮后判定为「死链」（排到该频道末尾，不直接删除）
 export const CHANNEL_DEAD_FAILS = 2;
+/** 域名去相关：一个频道的前 N 条源尽量来自不同 host（同 host 只出现一次） */
+export const CHANNEL_HOST_DIVERSIFY = 3;
+

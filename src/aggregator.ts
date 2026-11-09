@@ -15,7 +15,7 @@ import { loadShoppingFilter } from './core/live-filters';
 import { loadFtpConfig, uploadLiveTxt } from './core/ftp-sync';
 import { loadSkipList, addSkipList } from './core/site-skip';
 import { bareUrl } from './core/live-url';
-import { loadSpeedMap as loadChannelSpeedMap, runChannelProbe } from './core/channel-probe';
+import { loadSpeedMap as loadChannelSpeedMap, runChannelProbe, isProbeEnabled } from './core/channel-probe';
 import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_CHANNEL_MERGED_TREE, KV_AGG_LOGS, AGG_LOGS_MAX, KV_SITE_SNAPSHOT, KV_SITE_KEEP_LINK, KV_CHANNEL_PROBE_INLINE, KV_LIVE_USE_CONFIG_LIVES, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, BASE_URL_PLACEHOLDER, KV_SITE_HEALTH_MAP, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SOURCE_MAP } from './core/config';
 import { loadBlacklist, applyBlacklist, pruneBlacklist, saveBlacklist, siteFingerprint } from './core/blacklist';
 import { transformSiteNames } from './core/cleaner';
@@ -469,8 +469,21 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
       const liveMergeMode = (await storage.get(KV_LIVE_MERGE_MODE)) || 'separated';
       logger.infoFields('aggregation', 'Step 6.5: live-sources', { unique: uniqueInputs.length, mode: liveMergeMode });
 
+      // 测速前置：用上一轮落盘的频道树先测速，合并时一次拿到新鲜结果。
+      // 反过来（合并 → 测速 → 再合并）会把所有直播源下载两遍；而测速跑完上万次请求后
+      // 连接池会退化，第二遍下载经常整批超时（另一分支上实测直接把 lives 清成 0）。
+      const inlineProbe = (await storage.get(KV_CHANNEL_PROBE_INLINE)) !== 'false';
+      if (inlineProbe && (await isProbeEnabled(storage))) {
+        logger.info('aggregation', 'Step 6.5a: channel probe before merge...');
+        const probeStatus = await runChannelProbe(storage);
+        logger.infoFields('aggregation', 'inline-probe-done', {
+          state: probeStatus.state, probed: probeStatus.probed,
+          coverage: probeStatus.coverage, dead: probeStatus.dead ?? 0,
+        });
+      }
+
       // 两种模式都要用测速结果排序，否则「按源分开」模式下测速形同虚设
-      let channelSpeedMap = await loadChannelSpeedMap(storage);
+      const channelSpeedMap = await loadChannelSpeedMap(storage);
       // 分组归并：把各源自带的几百个杂组收进标准分组（只在合并模式下生效）
       const groupMerge = await loadLiveGroupMerge(storage);
       const shopping = await loadShoppingFilter(storage);
@@ -480,23 +493,6 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
         mergeResult = await separatedMergeLives(uniqueInputs, config.fetchTimeoutMs, channelSpeedMap);
       } else {
         mergeResult = await mergeLivesToNative(uniqueInputs, config.fetchTimeoutMs, channelSpeedMap, { groupMerge, shopping });
-      }
-
-      // 测速并入聚合：先落盘一次频道树，跑完测速再重新合并一次，保证本次输出就是最新顺序
-      const inlineProbe = (await storage.get(KV_CHANNEL_PROBE_INLINE)) !== 'false';
-      if (inlineProbe && mergeResult.groups.length > 0) {
-        await storage.put(KV_CHANNEL_MERGED_TREE, JSON.stringify(mergeResult.groups));
-        logger.info('aggregation', 'Step 6.5b: inline channel probe...');
-        const probeStatus = await runChannelProbe(storage);
-        logger.infoFields('aggregation', 'inline-probe-done', {
-          state: probeStatus.state, probed: probeStatus.probed,
-          coverage: probeStatus.coverage, dead: probeStatus.dead ?? 0,
-        });
-
-        channelSpeedMap = await loadChannelSpeedMap(storage);
-        mergeResult = liveMergeMode === 'separated'
-          ? await separatedMergeLives(uniqueInputs, config.fetchTimeoutMs, channelSpeedMap)
-          : await mergeLivesToNative(uniqueInputs, config.fetchTimeoutMs, channelSpeedMap, { groupMerge, shopping });
       }
 
       // 下载/解析整体失败时不要把直播树清空——沿用上次结果，避免电视端直播源突然变空
@@ -522,6 +518,7 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
       logger.infoFields('aggregation', 'live-merge-done', {
         downloaded: mergeResult.sourcesDownloaded, total: uniqueInputs.length,
         groups: mergeResult.groups.length, channels: mergeResult.totalChannels, urls: mergeResult.totalUrls,
+        diversified: mergeResult.diversifiedChannels ?? 0,
       });
     }
   }

@@ -260,6 +260,9 @@ export interface ChannelSpeedEntry {
   kind: 'm3u8' | 'ts' | 'tcp' | 'fail';
   fails?: number;           // 连续失败轮数（成功即清零），>= CHANNEL_DEAD_FAILS 视为死链
   samples?: number;         // 本轮有效样本数
+  stage?: 'playlist' | 'segment'; // 判定深度：playlist=只看清单，segment=验过分片
+  ruleVer?: number;         // 产生该结论的判定规则版本；规则升级时只让旧条目各自重测一次
+  note?: string;            // 失败原因（分片 404 / 分片超时 / 不是 m3u8…），供后台展示
 }
 export type ChannelSpeedMap = Record<string, ChannelSpeedEntry>;
 
