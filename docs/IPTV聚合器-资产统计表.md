@@ -80,3 +80,27 @@
 | 真实数据样本 | `dev/data/live-config.txt` | 3683 频道 / 17515 源，回归用 |
 
 > `dev/` 已在 `.gitignore` 中（其中 `askpass.sh` 含 NAS 明文密码）。
+
+---
+
+## 五、针对「固化 + 健康」的资产比对（2026-11-09）
+
+做设计核对时逐项确认过：哪些能直接用，哪些必须新写。结论是**字段定义直接采用他的，机制自己实现**。
+
+| 需求 | 现有资产 | 结论 |
+|---|---|---|
+| 健康字段 `lastOkAt / consecutiveFails / firstFailAt / lastFailReason` | 朋友 `types.ts` + `channel-health.ts` 已在用 | **直接采用**；我方 `fails` 迁移为 `consecutiveFails`，读取兼容旧值 |
+| 失败原因三分（永久/长期/短期）及其集合 | 他的 `PERMANENT_FAIL_REASONS` / `LONG_TERM_OBSERVE_REASONS` | **采用**，阈值常量一并取（MIN_FAILS=3、LONG_TERM=7d、RETRY=24h） |
+| 分级重测 | 他的 `shouldProbeEntry()` | **采用 + 改一处**：永久失败从「永不重测」改为 7 天回测（否则域名复活永不发现） |
+| 分片复验 | 我方 `verifyPlayable()` / `firstUri()` | 已有，直接复用 |
+| 并发池 | 双方都是扁平的 `runWithConcurrency` | **需改**：加 host 计数表与排队；无现成实现 |
+| 频道的稳定 id / 别名 | 无。他的 `LiveGroupSnapshot` 只有 `channels: string[]`（名字列表） | **需新建** |
+| 每轮历史序列 | 无。双方都只存最后一条结论 | **需新建**（12 轮位图 + 计数） |
+| 排序 / 域名去相关 | 我方 `live-url.ts` / `live-rank.ts` | 已有 |
+| 频道排序 UI（分类 + 拖动 + 智能排序） | 我方 `channelOrderSection` | 已有，迁到「频道」页后扩展源管理 |
+| 源健康面板 | 无，但 admin 现有 `.section` / 表格组件可复用 | 新建面板，样式复用 |
+| 源缓存的 last-good | 他的 `source-cache.ts` | 尚未取用；与固化无直接关系，P2 后评估 |
+
+**净新增代码预估**：registry + id 规则 ≈ 200 行；健康字段与位图 ≈ 120 行；
+host 限流 ≈ 60 行；复核首位 ≈ 80 行；两个面板 ≈ 400 行。合计约 860 行，
+均可落在现有 `core/live-*` 与 `core/channel-probe.ts` 的边界内，不引入新框架。
