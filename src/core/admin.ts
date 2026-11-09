@@ -289,9 +289,10 @@ ${sharedStyles}
   <!-- Tabs -->
   <div class="tabs">
     <div class="tab active" data-tab="sources" onclick="switchTab('sources')"><span data-i18n="tabSources">Sources</span> <span class="badge" id="badgeSources">0</span></div>
-    <div class="tab" data-tab="maccms" onclick="switchTab('maccms')"><span data-i18n="tabMacCMS">MacCMS</span> <span class="badge" id="badgeMacCMS">0</span></div>
+    <div class="tab" data-tab="health" onclick="switchTab('health')"><span data-i18n="tabHealth">源健康</span></div>
     <div class="tab" data-tab="live" onclick="switchTab('live')"><span data-i18n="tabLive">Live</span> <span class="badge" id="badgeLive">0</span></div>
     <div class="tab" data-tab="searchQuota" onclick="switchTab('searchQuota')" id="tabSearchQuota" style="display:none"><span data-i18n="tabSearchQuota">Search</span> <span class="badge" id="badgeSearchQuota">0</span></div>
+    <div class="tab" data-tab="channels" onclick="switchTab('channels')"><span data-i18n="tabChannels">频道</span> <span class="badge" id="badgeChannels">0</span></div>
     <div class="tab" data-tab="cloud" onclick="switchTab('cloud')"><span data-i18n="tabCloud">Cloud</span></div>
     <div class="tab" data-tab="settings" onclick="switchTab('settings')"><span data-i18n="tabSettings">Settings</span></div>
     <div class="tab" data-tab="aggLogs" onclick="switchTab('aggLogs')"><span data-i18n="tabAggLogs">Logs</span></div>
@@ -397,6 +398,11 @@ ${sharedStyles}
           <input type="checkbox" id="probeInlineCheck" onchange="saveProbeInline()">
           <span data-i18n="probeInlineLabel">测速并入聚合流程（不再单独定时跑）</span>
         </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="probeSegmentCheck" onchange="saveProbeSegment()">
+          <span data-i18n="probeSegmentLabel">分片复验（拉一小段视频确认真能播）</span>
+        </label>
+        <button class="btn btn-sm" onclick="clearProbeCache()" data-i18n="probeClearCache">清空测速缓存</button>
         <button class="btn btn-sm" id="channelProbeTriggerBtn" onclick="triggerChannelProbe()" data-i18n="channelProbeTrigger">Run Now</button>
         <button class="btn btn-sm" onclick="loadChannelProbe()" data-i18n="refresh">Refresh</button>
         <button class="btn btn-sm btn-danger" id="channelProbeDropBtn" onclick="dropDeadSources()" data-i18n="channelProbeDropDead">Clean Dead Sources</button>
@@ -473,6 +479,30 @@ ${sharedStyles}
       </div>
     </div>
 
+  </div>
+
+  <!-- Channels Tab -->
+  <div class="tab-panel" id="panelChannels">
+    <div class="section">
+      <div class="section-title" data-i18n="channelsTitle">频道与源</div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:0.82rem">
+          <span data-i18n="channelsTopN">每台保留</span>
+          <input id="topNInput" type="number" min="1" max="20" value="6" style="width:64px;padding:4px 6px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary)">
+          <span data-i18n="channelsTopNUnit">条源</span>
+        </label>
+        <button class="btn btn-sm btn-primary" onclick="optimizeChannels()" data-i18n="channelsOptimize">一键选优</button>
+        <button class="btn btn-sm" onclick="loadChannels()" data-i18n="refresh">刷新</button>
+        <span class="status-text" id="channelsStatus" style="font-family:var(--mono);font-size:0.75rem"></span>
+      </div>
+      <div id="channelSummary" style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:8px"></div>
+      <div style="display:flex;gap:12px;align-items:stretch;flex-wrap:wrap">
+        <div id="channelGroupList" style="flex:0 0 160px;max-height:420px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px"></div>
+        <div style="flex:1;min-width:320px;max-height:420px;overflow:auto;border:1px solid var(--border);border-radius:8px">
+          <div id="channelTable"></div>
+        </div>
+      </div>
+    </div>
     <!-- Channel Order -->
     <div class="section" id="channelOrderSection">
       <div class="section-title" data-i18n="channelOrderTitle">频道排序</div>
@@ -491,6 +521,26 @@ ${sharedStyles}
           <div id="channelOrderList" style="max-height:420px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:6px"></div>
         </div>
       </div>
+    </div>
+    <div class="section">
+      <div class="section-title" data-i18n="channelsUnmapped">未识别频道</div>
+      <div id="unmappedList" style="font-size:0.8rem;max-height:220px;overflow:auto"></div>
+    </div>
+  </div>
+
+  <!-- Health Tab -->
+  <div class="tab-panel" id="panelHealth">
+    <div class="section">
+      <div class="section-title" data-i18n="healthTitle">源健康概览</div>
+      <div id="healthSummary" style="display:flex;gap:18px;flex-wrap:wrap;font-size:0.82rem"></div>
+    </div>
+    <div class="section">
+      <div class="section-title" data-i18n="healthDomains">按域名（谁在拖后腿）</div>
+      <div id="healthDomains" style="max-height:420px;overflow:auto"></div>
+    </div>
+    <div class="section">
+      <div class="section-title" data-i18n="healthReasons">失败原因分布</div>
+      <div id="healthReasons" style="font-size:0.8rem"></div>
     </div>
   </div>
 
@@ -867,6 +917,10 @@ const translations = {
     shoppingFilterLabel:'Remove shopping / promo channels automatically',
     shoppingFilterHint:'Channels matching any keyword are dropped before merging and speed testing. Comma separated; avoid vague words like 精选.',
     probeInlineLabel:'Run speed test inside aggregation (no separate schedule)',
+    probeSegmentLabel:'Verify a real segment (recommended)',
+    probeClearCache:'Clear probe cache',
+    probeClearCacheConfirm:'Clear all speed results? The next run will re-probe every URL (slower, but needed after changing the rules).',
+    probeClearCacheDone:'Cleared {n} entries',
     groupMergeTitle:'Group Merge',
     groupMergeEnable:'Merge messy groups into standard ones',
     groupMergeReset:'Reset rules',
@@ -874,6 +928,19 @@ const translations = {
     groupMergeSaved:'Saved',
     groupMergeResetConfirm:'Reset group merge rules to defaults?',
     groupMergeResetDone:'Defaults restored',
+    tabChannels:'Channels',
+    tabHealth:'Source Health',
+    channelsTitle:'Channels & Sources',
+    channelsTopN:'keep', channelsTopNUnit:'sources per channel',
+    channelsOptimize:'Optimize',
+    channelsOptimizeConfirm:'Keep only the top {n} sources per channel?',
+    channelsOptimizeDone:'Applied: top {n}',
+    channelsDeleteConfirm:'Remove this source? It goes to the dead-source blacklist (reversible).',
+    channelsDeleted:'Removed',
+    channelsUnmapped:'Unmapped channels',
+    healthTitle:'Source health',
+    healthDomains:'By domain',
+    healthReasons:'Failure reasons',
     channelOrderTitle:'Channel Order',
     channelOrderSmart:'Smart sort (CCTV)',
     channelOrderSave:'Save order',
@@ -995,6 +1062,10 @@ const translations = {
     shoppingFilterLabel:'自动删除购物/推广频道',
     shoppingFilterHint:'命中任一关键词的频道会被直接剔除（不参与合并与测速）。逗号分隔；注意别用「精选」这类会误伤音乐合辑的词。',
     probeInlineLabel:'测速并入聚合流程（不再单独定时跑）',
+    probeSegmentLabel:'分片复验（拉一小段视频确认真能播）',
+    probeClearCache:'清空测速缓存',
+    probeClearCacheConfirm:'清空全部测速结果？下一轮会重新探测所有 URL（更慢，但改了判定规则后必须这么做）',
+    probeClearCacheDone:'已清空 {n} 条',
     groupMergeTitle:'分组归并',
     groupMergeEnable:'启用分组归并（把各源的杂组收进标准分组）',
     groupMergeReset:'恢复默认规则',
@@ -1002,6 +1073,19 @@ const translations = {
     groupMergeSaved:'已保存',
     groupMergeResetConfirm:'恢复默认的分组归并规则？',
     groupMergeResetDone:'已恢复默认',
+    tabChannels:'频道',
+    tabHealth:'源健康',
+    channelsTitle:'频道与源',
+    channelsTopN:'每台保留', channelsTopNUnit:'条源',
+    channelsOptimize:'一键选优',
+    channelsOptimizeConfirm:'每台只保留前 {n} 条源？',
+    channelsOptimizeDone:'已应用：每台 {n} 条',
+    channelsDeleteConfirm:'删除这条源？会进死源黑名单（可回滚）',
+    channelsDeleted:'已删除',
+    channelsUnmapped:'未识别频道',
+    healthTitle:'源健康概览',
+    healthDomains:'按域名（谁在拖后腿）',
+    healthReasons:'失败原因分布',
     channelOrderTitle:'频道排序',
     channelOrderSmart:'一键智能排序（央视）',
     channelOrderSave:'保存排序',
@@ -1079,6 +1163,8 @@ function switchTab(tab) {
   });
   // 排序面板数据依赖登录态，切到直播页时重新拉一次，避免登录前初始化时 401 后一直是空
   if (tab === 'live') loadChannelOrder();
+  if (tab === 'channels') { loadChannelOrder(); loadChannels(); }
+  if (tab === 'health') loadHealth();
 }
 
 // --- Source health ---
@@ -1841,6 +1927,37 @@ async function saveUseConfigLives() {
   } catch (e) { /* ignore */ }
 }
 
+// --- 测速分片复验 ---
+async function loadProbeSegment() {
+  try {
+    const res = await auth.authFetch('/admin/channel-probe/segment');
+    if (!res.ok) return;
+    const d = await res.json();
+    const cb = $('probeSegmentCheck');
+    if (cb) cb.checked = !!d.enabled;
+  } catch (e) { /* ignore */ }
+}
+
+async function saveProbeSegment() {
+  try {
+    await auth.authFetch('/admin/channel-probe/segment', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: $('probeSegmentCheck').checked })
+    });
+  } catch (e) { /* ignore */ }
+}
+
+async function clearProbeCache() {
+  if (!confirm(t('probeClearCacheConfirm'))) return;
+  try {
+    const res = await auth.authFetch('/admin/channel-probe/clear-cache', { method: 'POST' });
+    const d = await res.json();
+    if (d.success) toast(t('probeClearCacheDone').replace('{n}', d.cleared || 0));
+    else toast(d.error || 'Failed', 'error');
+  } catch (e) { toast(t('networkError'), 'error'); }
+}
+
 // --- 测速并入聚合 ---
 async function loadProbeInline() {
   try {
@@ -1951,6 +2068,187 @@ async function clearSkipList() {
     if (res.ok) {
       $('keepLinkStatus').textContent = t('clearSkipDone');
       setTimeout(loadKeepLink, 1200);
+    }
+  } catch (e) { /* ignore */ }
+}
+
+// --- 频道与源（固化框架） ---
+let channelsData = null;
+let channelCurrentGroup = null;
+
+function esc(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function tierBadge(h) {
+  if (!h || !h.samples) return '<span style="color:var(--text-secondary)">未测</span>';
+  if (h.tier === 0) return '<span style="color:var(--success,#1D9E75)">健康</span>';
+  if (h.tier === 1) return '<span style="color:var(--warning,#BA7517)">观察</span>';
+  return '<span style="color:var(--danger,#A32D2D)">隔离</span>';
+}
+
+async function loadChannels() {
+  const box = $('channelTable');
+  if (!box) return;
+  try {
+    const res = await auth.authFetch('/admin/channels');
+    if (!res.ok) { box.textContent = t('channelOrderNeedRefresh'); return; }
+    channelsData = await res.json();
+    if (!channelCurrentGroup && channelsData.groups && channelsData.groups.length) {
+      channelCurrentGroup = channelsData.groups[0].group;
+    }
+    renderChannelGroups();
+    renderChannelTable();
+    renderUnmapped();
+  } catch (e) {
+    box.textContent = t('networkError');
+  }
+}
+
+function renderChannelGroups() {
+  const box = $('channelGroupList');
+  if (!box || !channelsData) return;
+  box.innerHTML = '';
+  (channelsData.groups || []).forEach(function (g) {
+    const row = document.createElement('div');
+    const active = g.group === channelCurrentGroup;
+    row.style.cssText = 'padding:6px 8px;border-radius:6px;cursor:pointer;font-size:.85rem;display:flex;justify-content:space-between;' +
+      (active ? 'background:var(--accent,#378ADD);color:#fff' : '');
+    const n = document.createElement('span'); n.textContent = g.group;
+    const cnt = document.createElement('span'); cnt.textContent = String((g.channels || []).length);
+    cnt.style.cssText = 'opacity:.7;font-size:.75rem';
+    row.appendChild(n); row.appendChild(cnt);
+    row.addEventListener('click', function () { channelCurrentGroup = g.group; renderChannelGroups(); renderChannelTable(); });
+    box.appendChild(row);
+  });
+}
+
+function renderChannelTable() {
+  const box = $('channelTable');
+  const sum = $('channelSummary');
+  if (!box || !channelsData) return;
+  const g = (channelsData.groups || []).find(function (x) { return x.group === channelCurrentGroup; });
+  const chans = g ? g.channels || [] : [];
+  let totSources = 0;
+  (channelsData.groups || []).forEach(function (x) {
+    (x.channels || []).forEach(function (ch) { totSources += (ch.urls || []).length; });
+  });
+  if (sum) {
+    sum.textContent = '目录 ' + (channelsData.registrySize || 0) + ' 个频道 · 输出 ' +
+      (channelsData.groups || []).reduce(function (n, x) { return n + (x.channels || []).length; }, 0) +
+      ' 个 · ' + totSources + ' 条源 · 未识别 ' + ((channelsData.unmapped || []).length) + ' 条';
+  }
+
+  const rows = chans.map(function (ch) {
+    const first = (ch.urls || [])[0] || {};
+    const h = first.health || {};
+    const avail = h.availability != null ? Math.round(h.availability * 100) + '%' : '-';
+    const detail = (ch.urls || []).map(function (u, i) {
+      return '<div style="display:flex;justify-content:space-between;gap:8px;padding:2px 0;border-top:1px dashed var(--border)">' +
+        '<span style="color:var(--text-secondary);font-size:.72rem">' + (i + 1) + '</span>' +
+        '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.72rem">' + esc(u.url) + '</span>' +
+        '<span style="font-size:.72rem;color:var(--text-secondary)">' + (u.kind === 'fail' ? (u.note || '不可用') : (u.speedMs + 'ms')) + '</span>' +
+        '<a href="javascript:void(0)" data-url="' + esc(u.url) + '" onclick="deleteSource(this.dataset.url)" style="font-size:.72rem;color:var(--danger,#A32D2D)">删</a>' +
+        '</div>';
+    }).join('');
+    return '<details style="border-bottom:1px solid var(--border)">' +
+      '<summary style="display:flex;gap:10px;align-items:center;padding:6px 8px;cursor:pointer;font-size:.82rem">' +
+      '<span style="min-width:130px">' + esc(ch.name) + '</span>' +
+      '<span style="min-width:80px;color:var(--text-secondary);font-size:.72rem">' + esc(ch.id || '-') + '</span>' +
+      '<span style="min-width:46px;color:var(--text-secondary)">' + (ch.urls || []).length + ' 源</span>' +
+      '<span style="min-width:60px">' + (first.kind === 'fail' ? '-' : (first.speedMs + 'ms')) + '</span>' +
+      '<span style="min-width:52px">' + tierBadge(h) + '</span>' +
+      '<span style="color:var(--text-secondary);font-size:.72rem">' + avail + '</span>' +
+      '</summary><div style="padding:0 8px 8px 8px">' + detail + '</div></details>';
+  }).join('');
+  box.innerHTML = rows || '<div style="padding:10px;font-size:.82rem;color:var(--text-secondary)">该分组暂无频道</div>';
+}
+
+function renderUnmapped() {
+  const box = $('unmappedList');
+  if (!box || !channelsData) return;
+  const list = channelsData.unmapped || [];
+  if (!list.length) { box.innerHTML = '<span style="color:var(--text-secondary)">没有未识别频道</span>'; return; }
+  box.innerHTML = list.slice(0, 200).map(function (u) {
+    return '<div style="padding:3px 0;border-bottom:1px solid var(--border)">' +
+      esc(u.name) + ' <span style="color:var(--text-secondary);font-size:.72rem">' + esc(u.group) + ' · ' + u.urls + ' 源</span></div>';
+  }).join('');
+}
+
+async function optimizeChannels() {
+  const n = parseInt(($('topNInput') || {}).value, 10) || 6;
+  const st = $('channelsStatus');
+  if (!confirm(t('channelsOptimizeConfirm').replace('{n}', n))) return;
+  try {
+    const res = await auth.authFetch('/admin/channels/optimize', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ topN: n }),
+    });
+    const d = await res.json();
+    if (res.ok) {
+      if (st) st.textContent = t('channelsOptimizeDone').replace('{n}', d.topN);
+      setTimeout(loadChannels, 1500);
+    } else if (st) st.textContent = d.error || 'Failed';
+  } catch (e) { if (st) st.textContent = t('networkError'); }
+}
+
+async function deleteSource(url) {
+  if (!confirm(t('channelsDeleteConfirm'))) return;
+  try {
+    const res = await auth.authFetch('/admin/channels/source', {
+      method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ urls: [url] }),
+    });
+    if (res.ok) { toast(t('channelsDeleted')); setTimeout(loadChannels, 1200); }
+  } catch (e) { toast(t('networkError'), 'error'); }
+}
+
+// --- 源健康 ---
+async function loadHealth() {
+  try {
+    const [sRes, dRes, rRes] = await Promise.all([
+      auth.authFetch('/admin/health/summary'),
+      auth.authFetch('/admin/health/domains?limit=40'),
+      auth.authFetch('/admin/health/reasons'),
+    ]);
+    if (!sRes.ok) return;
+    const s = await sRes.json();
+    const doms = dRes.ok ? await dRes.json() : [];
+    const reasons = rRes.ok ? await rRes.json() : [];
+
+    const sum = $('healthSummary');
+    if (sum) {
+      const cell = function (label, value, color) {
+        return '<div><div style="color:var(--text-secondary);font-size:.72rem">' + label + '</div>' +
+          '<div style="font-size:1.1rem;' + (color ? 'color:' + color : '') + '">' + value + '</div></div>';
+      };
+      sum.innerHTML = [
+        cell('源总数', s.total),
+        cell('可用', s.ok + ' (' + Math.round(s.okRate * 100) + '%)', 'var(--success,#1D9E75)'),
+        cell('不可用', s.dead, 'var(--danger,#A32D2D)'),
+        cell('连续失败', s.isolated, 'var(--warning,#BA7517)'),
+        cell('域名', s.domains),
+      ].join('');
+    }
+
+    const dbox = $('healthDomains');
+    if (dbox) {
+      dbox.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:.8rem">' +
+        '<thead><tr style="text-align:left;color:var(--text-secondary)"><th style="padding:6px">域名</th><th>源</th><th>可用率</th><th>平均延迟</th></tr></thead><tbody>' +
+        doms.map(function (d) {
+          const rate = Math.round(d.okRate * 100);
+          return '<tr style="border-top:1px solid var(--border)"><td style="padding:5px 6px">' + esc(d.host) + '</td>' +
+            '<td>' + d.sources + '</td>' +
+            '<td style="color:' + (rate < 30 ? 'var(--danger,#A32D2D)' : rate < 70 ? 'var(--warning,#BA7517)' : 'var(--success,#1D9E75)') + '">' + rate + '%</td>' +
+            '<td>' + (d.avgMs || '-') + 'ms</td></tr>';
+        }).join('') + '</tbody></table>';
+    }
+
+    const rbox = $('healthReasons');
+    if (rbox) {
+      rbox.innerHTML = reasons.length
+        ? reasons.map(function (r) { return '<div style="padding:2px 0">' + esc(r.reason) + ' <span style="color:var(--text-secondary)">× ' + r.count + '</span></div>'; }).join('')
+        : '<span style="color:var(--text-secondary)">暂无失败记录</span>';
     }
   } catch (e) { /* ignore */ }
 }
@@ -2867,6 +3165,7 @@ loadLiveGroups();
 loadShoppingFilter();
 loadUseConfigLives();
 loadProbeInline();
+loadProbeSegment();
 loadChannelOrder();
 loadSmartBaseUrl();
 loadProbeDepth();

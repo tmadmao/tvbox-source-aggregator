@@ -262,6 +262,12 @@ export interface ChannelSpeedEntry {
   samples?: number;         // 本轮有效样本数
   stage?: 'playlist' | 'segment'; // 判定深度：playlist=只看清单，segment=验过分片
   ruleVer?: number;         // 产生该结论的判定规则版本；规则升级时只让旧条目各自重测一次
+  okCount?: number;         // 累计成功次数
+  failCount?: number;       // 累计失败次数
+  history?: string;         // 最近 N 轮结果位图（'1' 成功 / '0' 失败）
+  consecutiveFails?: number; // 连续失败次数（成功清零）
+  lastOkAt?: string;        // 最近一次成功时间
+  firstFailAt?: string;     // 本轮连续失败的起点
   note?: string;            // 失败原因（分片 404 / 分片超时 / 不是 m3u8…），供后台展示
 }
 export type ChannelSpeedMap = Record<string, ChannelSpeedEntry>;

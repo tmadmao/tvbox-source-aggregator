@@ -23,6 +23,8 @@ import {
   TVBOX_UA,
 } from './config';
 import { extractAllUrls } from './live-merger';
+import { netFetch } from './probe-net';
+import { recordProbe } from './source-health';
 import { removeRecoveredUrls } from './live-deadlist';
 
 // ─── 开关/状态 ─────────────────────────────────────────
@@ -150,7 +152,7 @@ async function fetchTextQuick(url: string, maxBytes = 32768): Promise<string | n
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), CHANNEL_PROBE_SEGMENT_TIMEOUT_MS);
   try {
-    const resp = await fetch(url, { signal: ctl.signal, headers: { 'User-Agent': TVBOX_UA } });
+    const resp = await netFetch(url, { signal: ctl.signal, headers: { 'User-Agent': TVBOX_UA } });
     if (!resp.ok) return null;
     const reader = resp.body?.getReader();
     if (!reader) return null;
@@ -172,7 +174,7 @@ async function probeSegment(url: string): Promise<{ ok: boolean; bytes: number; 
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), CHANNEL_PROBE_SEGMENT_TIMEOUT_MS);
   try {
-    const resp = await fetch(url, { signal: ctl.signal, headers: { 'User-Agent': TVBOX_UA } });
+    const resp = await netFetch(url, { signal: ctl.signal, headers: { 'User-Agent': TVBOX_UA } });
     if (!resp.ok) return { ok: false, bytes: 0, note: `分片 HTTP ${resp.status}` };
     const reader = resp.body?.getReader();
     if (!reader) return { ok: false, bytes: 0, note: '分片无响应体' };
@@ -276,7 +278,7 @@ export async function probeUrlOnce(url: string, skipL2 = false): Promise<OnceRes
   const start = Date.now();
 
   try {
-    const resp = await fetch(url, {
+    const resp = await netFetch(url, {
       signal: controller.signal,
       headers: { 'User-Agent': TVBOX_UA },
     });
@@ -601,32 +603,15 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
     // 每条结果即时落到 next，并定期落盘 —— 跑 20 分钟的任务不能一崩全丢
     const applyResult = (r: ProbeResult): void => {
       if (!r || !r.url) return;
-      const prev = next[r.url];
-      if (r.kind === 'fail') {
-        failed++;
-        // 连续失败累计：达到阈值才算死链（单次抖动不算）
-        next[r.url] = {
-          speedMs: 0,
-          probedAt: new Date().toISOString(),
-          kind: 'fail',
-          fails: (prev?.fails ?? 0) + 1,
-          ruleVer: CHANNEL_PROBE_RULE_VERSION,
-          stage: r.stage,
-          note: r.note,
-        };
-      } else {
+      if (r.kind === 'fail') failed++;
+      else {
         success++;
         recovered.push(r.url);
-        next[r.url] = {
-          speedMs: r.speedMs,
-          probedAt: new Date().toISOString(),
-          kind: r.kind,
-          fails: 0,
-          samples: r.samples,
-          ruleVer: CHANNEL_PROBE_RULE_VERSION,
-          stage: r.stage,
-        };
       }
+      // 健康字段只经由 recordProbe 写入，probe 与「输出前复核」共用同一口径
+      const entry = recordProbe(next, r.url, r);
+      entry.ruleVer = CHANNEL_PROBE_RULE_VERSION;
+      if (r.kind !== 'fail') entry.samples = r.samples;
     };
 
     const { done, budgetExhausted } = await runWithConcurrency(

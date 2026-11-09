@@ -26,6 +26,8 @@ import { formatLiveGroupsAsTxt, fetchAndParseLiveUrls } from './core/live-merger
 import type { TVBoxConfig, SearchQuotaConfig, CloudPlatform, CloudCredential, TVBoxLiveGroup } from './core/types';
 import { mountChannelProbeRoutes } from './routes/channel-probe-admin';
 import { mountChannelOrderRoutes } from './routes/channel-order-admin';
+import { mountChannelRoutes } from './routes/channels-admin';
+import { mountHealthRoutes } from './routes/health-admin';
 import { loadSkipList, clearSkipList } from './core/site-skip';
 import { loadFtpConfig, saveFtpConfig, testFtpConnection, uploadLiveTxt, type FtpSyncConfig } from './core/ftp-sync';
 
@@ -1938,6 +1940,8 @@ export function createApp(deps: AppDeps): Hono {
   if (deps.enableChannelProbe) {
     mountChannelProbeRoutes(app, { storage, config, triggerRefresh: deps.triggerRefresh });
     mountChannelOrderRoutes(app, { storage, config, triggerRefresh: deps.triggerRefresh });
+    mountChannelRoutes(app, { storage, config, triggerRefresh: deps.triggerRefresh });
+    mountHealthRoutes(app, { storage, config });
   }
 
   // Builder 路由（仅 Node/Docker 启用，动态 import 避免 CF bundle 引入 fs/path）

@@ -9,6 +9,7 @@
 import type { ChannelSpeedMap, TVBoxLiveGroup } from './types';
 import { bareUrl } from './live-url';
 import { probeUrlOnce } from './channel-probe';
+import { recordProbe } from './source-health';
 
 export interface ReverifyOptions {
   /** 每个频道最多往后试几条，默认 3 */
@@ -100,18 +101,7 @@ export async function reverifyHeadSources(
 
   const applyResult = (url: string, r: Awaited<ReturnType<typeof probeUrlOnce>>): void => {
     stats.requests++;
-    const prev = speedMap[url];
-    speedMap[url] = {
-      ...(prev || {}),
-      speedMs: r.kind === 'fail' ? 0 : r.speedMs,
-      kind: r.kind,
-      probedAt: new Date().toISOString(),
-      stage: r.stage,
-      ...(r.note ? { note: r.note } : {}),
-      ...(r.kind === 'fail'
-        ? { fails: (prev?.fails ?? 0) + 1 }
-        : { fails: 0 }),
-    };
+    recordProbe(speedMap, url, r);
   };
 
   let cursor = 0;

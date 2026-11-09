@@ -10,6 +10,8 @@ import { rewriteJarUrls } from './core/jar-proxy';
 import { mergeLivesToNative, separatedMergeLives, formatLiveGroupsAsTxt, type LiveSourceInput } from './core/live-merger';
 import { loadDeadUrls } from './core/live-deadlist';
 import { reverifyHeadSources } from './core/live-verify';
+import { withProbeNet } from './core/probe-net';
+import { trimGroupsToTopN } from './core/live-url';
 import { loadChannelOrder, applyChannelOrder } from './core/live-order';
 import { loadLiveGroupMerge } from './core/live-groups';
 import { loadShoppingFilter } from './core/live-filters';
@@ -17,7 +19,7 @@ import { loadFtpConfig, uploadLiveTxt } from './core/ftp-sync';
 import { loadSkipList, addSkipList } from './core/site-skip';
 import { bareUrl } from './core/live-url';
 import { loadSpeedMap as loadChannelSpeedMap, saveSpeedMap, runChannelProbe, isProbeEnabled } from './core/channel-probe';
-import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_CHANNEL_MERGED_TREE, KV_AGG_LOGS, AGG_LOGS_MAX, KV_SITE_SNAPSHOT, KV_SITE_KEEP_LINK, KV_CHANNEL_PROBE_INLINE, KV_LIVE_HEAD_VERIFY, KV_LIVE_USE_CONFIG_LIVES, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, BASE_URL_PLACEHOLDER, KV_SITE_HEALTH_MAP, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SOURCE_MAP } from './core/config';
+import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_CHANNEL_MERGED_TREE, KV_AGG_LOGS, AGG_LOGS_MAX, KV_SITE_SNAPSHOT, KV_SITE_KEEP_LINK, KV_CHANNEL_PROBE_INLINE, KV_LIVE_HEAD_VERIFY, KV_LIVE_TOP_N, KV_LIVE_USE_CONFIG_LIVES, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, BASE_URL_PLACEHOLDER, KV_SITE_HEALTH_MAP, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SOURCE_MAP } from './core/config';
 import { loadBlacklist, applyBlacklist, pruneBlacklist, saveBlacklist, siteFingerprint } from './core/blacklist';
 import { transformSiteNames } from './core/cleaner';
 import { parseConfigJson, type FetchProxyConfig } from './core/fetcher';
@@ -476,7 +478,7 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
       const inlineProbe = (await storage.get(KV_CHANNEL_PROBE_INLINE)) !== 'false';
       if (inlineProbe && (await isProbeEnabled(storage))) {
         logger.info('aggregation', 'Step 6.5a: channel probe before merge...');
-        const probeStatus = await runChannelProbe(storage);
+        const probeStatus = await withProbeNet(() => runChannelProbe(storage));
         logger.infoFields('aggregation', 'inline-probe-done', {
           state: probeStatus.state, probed: probeStatus.probed,
           coverage: probeStatus.coverage, dead: probeStatus.dead ?? 0,
@@ -557,15 +559,27 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
     }
   }
 
+  // Step 6.6a: 一键选优（每频道保留 topN 条源）
+  const topN = Number(await storage.get(KV_LIVE_TOP_N)) || 0;
+  if (topN > 0 && Array.isArray(merged.lives) && merged.lives.length > 0) {
+    const before = merged.lives.reduce((n: number, g: { channels?: Array<{ urls?: string[] }> }) =>
+      n + (g.channels || []).reduce((m, ch) => m + (ch.urls || []).length, 0), 0);
+    const trimmed = trimGroupsToTopN(merged.lives as unknown as TVBoxLiveGroup[], topN);
+    const after = trimmed.reduce((n, g) =>
+      n + (g.channels || []).reduce((m, ch) => m + (ch.urls || []).length, 0), 0);
+    merged.lives = trimmed as never;
+    if (after !== before) logger.infoFields('aggregation', 'top-n-applied', { topN, before, after });
+  }
+
   // Step 6.6b: 输出前复核首位源
   // 测速是「过去某一刻」的事实，实测首位可播率只有 73%：第一位不行就换下一位，
   // 让电视端少等一轮超时。只复核每个频道的前 3 条，同域并发限 4，避免把源打崩。
   if ((await storage.get(KV_LIVE_HEAD_VERIFY)) !== 'false' && Array.isArray(merged.lives) && merged.lives.length > 0) {
     const verifyMap = await loadChannelSpeedMap(storage);
-    const { stats } = await reverifyHeadSources(
+    const { stats } = await withProbeNet(() => reverifyHeadSources(
       merged.lives as unknown as TVBoxLiveGroup[],
       verifyMap,
-    );
+    ));
     if (stats.requests > 0) {
       await saveSpeedMap(storage, verifyMap);
       logger.infoFields('aggregation', 'head-reverify-done', {
