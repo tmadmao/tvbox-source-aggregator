@@ -545,6 +545,23 @@ ${sharedStyles}
       <div class="section-title" data-i18n="healthReasons">失败原因分布</div>
       <div id="healthReasons" style="font-size:0.8rem"></div>
     </div>
+    <div class="section">
+      <div class="section-title" data-i18n="hostLedgerTitle">域名台账（死源按域名收敛）</div>
+      <div id="hostStats" style="display:flex;gap:18px;flex-wrap:wrap;font-size:0.82rem;margin-bottom:8px"></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <button class="btn btn-sm" onclick="reseedHosts()" data-i18n="hostLedgerReseed">按当前树重建</button>
+        <span class="status-text" id="hostStatus" style="font-family:var(--mono);font-size:0.75rem"></span>
+      </div>
+      <div id="hostTable" style="max-height:360px;overflow:auto"></div>
+    </div>
+    <div class="section">
+      <div class="section-title" data-i18n="headVerifyTitle">输出前复核首位源</div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:0.82rem">
+        <input type="checkbox" id="headVerifyCheck" onchange="saveHeadVerify()">
+        <span data-i18n="headVerifyDesc">每台前 3 条先探一次，第一位不通就换下一条（会多花约 1 分钟）</span>
+      </label>
+      <span class="status-text" id="headVerifyStatus" style="font-family:var(--mono);font-size:0.75rem"></span>
+    </div>
   </div>
 
   <!-- Search Quota Tab -->
@@ -945,6 +962,11 @@ const translations = {
     healthTitle:'Source health',
     healthDomains:'By domain',
     healthReasons:'Failure reasons',
+    hostLedgerTitle:'Host ledger (dead sources grouped by domain)',
+    hostLedgerReseed:'Rebuild from current tree',
+    hostLedgerReseedConfirm:'Rebuild the host ledger from the current channel tree?',
+    headVerifyTitle:'Verify first source before output',
+    headVerifyDesc:'Probe up to 3 sources per channel and promote a working one to the top (adds ~1 minute).',
     channelOrderTitle:'Channel Order',
     channelOrderSmart:'Smart sort (CCTV)',
     channelOrderSave:'Save order',
@@ -1091,6 +1113,11 @@ const translations = {
     healthTitle:'源健康概览',
     healthDomains:'按域名（谁在拖后腿）',
     healthReasons:'失败原因分布',
+    hostLedgerTitle:'域名台账（死源按域名收敛）',
+    hostLedgerReseed:'按当前树重建',
+    hostLedgerReseedConfirm:'按当前频道树重建域名台账？',
+    headVerifyTitle:'输出前复核首位源',
+    headVerifyDesc:'每台前 3 条先探一次，第一位不通就换下一条（会多花约 1 分钟）。',
     channelOrderTitle:'频道排序',
     channelOrderSmart:'一键智能排序（央视）',
     channelOrderSave:'保存排序',
@@ -2313,6 +2340,79 @@ async function loadHealth() {
         : '<span style="color:var(--text-secondary)">暂无失败记录</span>';
     }
   } catch (e) { /* ignore */ }
+  loadHosts();
+  loadHeadVerify();
+}
+
+// --- 域名台账 ---
+async function loadHosts() {
+  const statsBox = $('hostStats');
+  const table = $('hostTable');
+  if (!statsBox || !table) return;
+  try {
+    const res = await auth.authFetch('/admin/channel-probe/hosts');
+    if (!res.ok) { table.innerHTML = '<span style="color:var(--text-secondary)">读取失败</span>'; return; }
+    const d = await res.json();
+    const cell = function (label, value, color) {
+      return '<div><div style="color:var(--text-secondary);font-size:.72rem">' + label + '</div>' +
+        '<div style="font-size:1.05rem;' + (color ? 'color:' + color : '') + '">' + value + '</div></div>';
+    };
+    statsBox.innerHTML = [
+      cell('树里域名', d.treeHosts),
+      cell('已入档', d.total),
+      cell('可疑', d.suspect, 'var(--warning,#BA7517)'),
+      cell('判死', d.condemned, 'var(--danger,#A32D2D)'),
+      cell('覆盖源', d.coveredUrls),
+      cell('本周待测', d.due),
+    ].join('');
+    table.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:.8rem">' +
+      '<thead><tr style="text-align:left;color:var(--text-secondary)"><th style="padding:6px">域名</th><th>状态</th><th>源</th><th>已入档</th></tr></thead><tbody>' +
+      (d.top || []).map(function (h) {
+        return '<tr style="border-top:1px solid var(--border)">' +
+          '<td style="padding:5px 6px">' + esc(h.host) + '</td>' +
+          '<td style="color:' + (h.state === 2 ? 'var(--danger,#A32D2D)' : 'var(--warning,#BA7517)') + '">' + (h.state === 2 ? '判死' : '可疑') + '</td>' +
+          '<td>' + h.urls + '</td>' +
+          '<td>' + (h.sinceDays || 0) + ' 天</td></tr>';
+      }).join('') + '</tbody></table>';
+  } catch (e) { /* ignore */ }
+}
+
+async function reseedHosts() {
+  const st = $('hostStatus');
+  if (!confirm(t('hostLedgerReseedConfirm'))) return;
+  if (st) st.textContent = '...';
+  try {
+    const res = await auth.authFetch('/admin/channel-probe/hosts/reseed', { method: 'POST' });
+    const d = await res.json();
+    if (st) st.textContent = res.ok ? ('新增 ' + d.added + ' / 共 ' + d.total) : (d.error || '失败');
+    if (res.ok) loadHosts();
+  } catch (e) { if (st) st.textContent = t('networkError'); }
+}
+
+// --- 首位复核开关 ---
+async function loadHeadVerify() {
+  const box = $('headVerifyCheck');
+  if (!box) return;
+  try {
+    const res = await auth.authFetch('/admin/live-head-verify');
+    if (!res.ok) return;
+    const d = await res.json();
+    box.checked = !!d.enabled;
+  } catch (e) { /* ignore */ }
+}
+
+async function saveHeadVerify() {
+  const box = $('headVerifyCheck');
+  const st = $('headVerifyStatus');
+  if (!box) return;
+  try {
+    const res = await auth.authFetch('/admin/live-head-verify', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: box.checked }),
+    });
+    if (st) st.textContent = res.ok ? (box.checked ? '已开启' : '已关闭') : '保存失败';
+    setTimeout(function () { if (st) st.textContent = ''; }, 2500);
+  } catch (e) { if (st) st.textContent = t('networkError'); }
 }
 
 // --- Channel Order (频道排序) ---

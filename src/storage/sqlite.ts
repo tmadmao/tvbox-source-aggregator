@@ -31,6 +31,14 @@ export class SQLiteStorage implements Storage {
     this.stmtPut.run(key, value);
   }
 
+  /**
+   * 在线快照：better-sqlite3 的 backup 走 SQLite 的备份 API，
+   * 不锁库、不影响正在跑的聚合，比直接 copy 文件安全（WAL 下 copy 出来的可能是半个库）。
+   */
+  async backupTo(dest: string): Promise<void> {
+    await this.db.backup(dest);
+  }
+
   close(): void {
     this.db.close();
   }

@@ -22,7 +22,7 @@ import { loadFtpConfig, uploadLiveTxt } from './core/ftp-sync';
 import { loadSkipList, addSkipList } from './core/site-skip';
 import { bareUrl } from './core/live-url';
 import { loadSpeedMap as loadChannelSpeedMap, saveSpeedMap, runChannelProbe, isProbeEnabled } from './core/channel-probe';
-import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_CHANNEL_MERGED_TREE, KV_AGG_LOGS, AGG_LOGS_MAX, KV_SITE_SNAPSHOT, KV_SITE_KEEP_LINK, KV_CHANNEL_PROBE_INLINE, KV_LIVE_HEAD_VERIFY, KV_LIVE_TOP_N, KV_LIVE_USE_CONFIG_LIVES, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, BASE_URL_PLACEHOLDER, KV_SITE_HEALTH_MAP, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SOURCE_MAP } from './core/config';
+import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_CHANNEL_MERGED_TREE, KV_AGG_LOGS, AGG_LOGS_MAX, KV_SITE_SNAPSHOT, KV_SITE_KEEP_LINK, KV_CHANNEL_PROBE_INLINE, KV_LIVE_HEAD_VERIFY, KV_LIVE_TOP_N, KV_LIVE_USE_CONFIG_LIVES, KV_LIVE_HIDE_DEAD, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, BASE_URL_PLACEHOLDER, KV_SITE_HEALTH_MAP, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SOURCE_MAP } from './core/config';
 import { loadBlacklist, applyBlacklist, pruneBlacklist, saveBlacklist, siteFingerprint } from './core/blacklist';
 import { transformSiteNames } from './core/cleaner';
 import { parseConfigJson, type FetchProxyConfig } from './core/fetcher';
@@ -360,7 +360,11 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
     }
 
     logger.infoFields('aggregation', 'Step 6: site probe', { depth: probeDeep ? 'deep' : 'shallow' });
-    siteProbeMap = await batchSiteSpeedTest(probeTargets, config.siteTimeoutMs, probeDeep);
+    // 站点验活也走独立连接池：跑完就销毁，不污染后续的直播下载与合并
+    siteProbeMap = await withProbeNet(
+      () => batchSiteSpeedTest(probeTargets, config.siteTimeoutMs, probeDeep),
+      { connections: 48, connectTimeoutMs: 5000 },
+    );
 
     // 提取纯 speedMs map 供后续 dedup 使用
     for (const [key, probe] of siteProbeMap) {
@@ -641,6 +645,28 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
       mergedDupes: curated.mergedDupes, disabled: curated.disabled, rescued: curated.rescued,
       pinned: Object.values(overrides).filter((o) => o?.pinned).length,
     });
+
+    // Step 6.7c: 隐藏「所有源都不可用」的频道
+    // 实测 379/1166（32.5%）的台一条可播源都没有，留着就是让人点进去看黑屏。
+    // 默认开；KV 置 'false' 可退回「保留但沉底」的旧行为。
+    if ((await storage.get(KV_LIVE_HIDE_DEAD)) !== 'false') {
+      let hidden = 0;
+      const keptGroups: TVBoxLiveGroup[] = [];
+      for (const g of merged.lives as TVBoxLiveGroup[]) {
+        const channels = (g.channels || []).filter((ch) => {
+          // 没测过（无条目）不算死：不知道就不该删
+          const playable = (ch.urls || []).some((u) => {
+            const e = curateSpeedMap[bareUrl(u)];
+            return !e || e.kind !== 'fail';
+          });
+          if (!playable) hidden++;
+          return playable;
+        });
+        if (channels.length > 0) keptGroups.push({ group: g.group, channels });
+      }
+      merged.lives = keptGroups as never;
+      logger.infoFields('aggregation', 'dead-channels-hidden', { hidden, leftGroups: keptGroups.length });
+    }
 
     // 编排会把频道改成正式名（江苏·南京新闻 → 南京新闻综合），目录要跟着补槽，
     // 否则后台看到的 id 是空的、未识别队列里全是刚改好名的频道。

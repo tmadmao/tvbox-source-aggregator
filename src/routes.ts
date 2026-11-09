@@ -3,7 +3,7 @@
 import { Hono } from 'hono';
 import type { Storage } from './storage/interface';
 import type { AppConfig, SourceEntry, MacCMSSourceEntry, LiveSourceEntry, NameTransformConfig, EdgeProxyConfig } from './core/types';
-import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_MANUAL_SOURCES, KV_LAST_UPDATE, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, LIVE_PROXY_TTL, IMG_PROXY_TTL, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_CRON_INTERVAL, DEFAULT_CRON_INTERVAL, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_AGG_LOGS, KV_BG_SETTINGS, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, KV_SMART_BASE_URL_ENABLED, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SITE_HEALTH_MAP } from './core/config';
+import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_MANUAL_SOURCES, KV_LAST_UPDATE, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, LIVE_PROXY_TTL, IMG_PROXY_TTL, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_CRON_INTERVAL, DEFAULT_CRON_INTERVAL, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_AGG_LOGS, KV_BG_SETTINGS, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, KV_SMART_BASE_URL_ENABLED, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SITE_HEALTH_MAP, KV_LIVE_HEAD_VERIFY } from './core/config';
 import { getRequestBaseUrl, applyBaseUrlPlaceholder, assertHostAllowed } from './core/base-url';
 import { logger } from './core/logger';
 import { loadGroupOrder, saveGroupOrder } from './core/group-order';
@@ -1756,6 +1756,23 @@ export function createApp(deps: AppDeps): Hono {
       const msg = error instanceof Error ? error.message : String(error);
       return c.json({ success: false, error: msg }, 500);
     }
+  });
+
+  // ─── 输出前复核首位源开关 ──────────────────────────────────
+  // 默认开；这条曾因死锁被手工置 false，界面上必须能看见、能改回来
+  app.get('/admin/live-head-verify', async (c) => {
+    const raw = await storage.get(KV_LIVE_HEAD_VERIFY);
+    return c.json({ enabled: raw !== 'false' });
+  });
+
+  app.put('/admin/live-head-verify', async (c) => {
+    if (config.adminToken) {
+      const auth = c.req.raw.headers.get('Authorization');
+      if (auth !== `Bearer ${config.adminToken}`) return c.json({ error: 'Unauthorized' }, 401);
+    }
+    const body = await c.req.json<{ enabled: boolean }>();
+    await storage.put(KV_LIVE_HEAD_VERIFY, body.enabled ? 'true' : 'false');
+    return c.json({ success: true, enabled: !!body.enabled });
   });
 
   // ─── 直播禁用开关 ─────────────────────────────────────────

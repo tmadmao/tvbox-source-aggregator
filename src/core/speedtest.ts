@@ -1,5 +1,6 @@
 import { TVBOX_UA } from './config';
 import { logger } from './logger';
+import { netFetch } from './probe-net';
 import type { TVBoxSite } from './types';
 
 export type ProbeResult = 'ok' | 'empty' | 'error' | 'timeout';
@@ -16,7 +17,9 @@ async function siteProbe(url: string, siteType: number, timeoutMs: number, deep:
 
   try {
     const start = Date.now();
-    const resp = await fetch(url, {
+    // 走 netFetch：有探测专用池时就用它，避免把全局 undici 池打散后
+    // 反过来把「站点验活」自己拖成十几分钟（历史问题，见开发日志第五轮）
+    const resp = await netFetch(url, {
       signal: controller.signal,
       headers: { 'User-Agent': TVBOX_UA },
     });

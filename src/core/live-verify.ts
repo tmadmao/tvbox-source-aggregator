@@ -113,6 +113,7 @@ export async function reverifyHeadSources(
   const deadline = started + budgetMs;
 
   const stats: ReverifyStats = { checked: 0, promoted: 0, allDead: 0, requests: 0, elapsedMs: 0 };
+  console.log(`[live-verify] start: channels=${groups.reduce((n, g) => n + (g.channels || []).length, 0)} concurrency=${concurrency} perHost=${perHost} budget=${Math.round(budgetMs / 1000)}s`);
   const gate: HostGate = { counts: new Map(), waiters: new Map() };
 
   // 收集待复核频道（只处理有多个源的，单源频道复不复核结果一样，但也能暴露死链）
@@ -138,6 +139,10 @@ export async function reverifyHeadSources(
       const urls = task.urls;
       if (urls.length === 0) continue;
       stats.checked++;
+      // 每 100 个频道打一行：这步以前会「静默卡死」，没有进度就只能靠猜
+      if (stats.checked % 100 === 0) {
+        console.log(`[live-verify] progress ${stats.checked}/${tasks.length} requests=${stats.requests} promoted=${stats.promoted} elapsed=${Math.round((Date.now() - started) / 1000)}s`);
+      }
 
       let firstOk = -1;
       for (let i = 0; i < urls.length; i++) {

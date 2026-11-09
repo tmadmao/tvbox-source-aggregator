@@ -10,6 +10,7 @@ import * as dns from 'dns';
 import { createApp } from './routes';
 import { runAggregation } from './aggregator';
 import { runChannelProbe, isProbeEnabled } from './core/channel-probe';
+import { SQLiteStorage } from './storage/sqlite';
 import {
   DEFAULT_SPEED_TIMEOUT_MS,
   DEFAULT_SITE_TIMEOUT_MS,
@@ -152,6 +153,31 @@ async function main() {
       runWithGuard();
     });
     console.log(`[cron] Scheduled: ${cronExpr}`);
+  }
+
+  // ─── 每日数据库快照 ──────────────────────────────────────
+  // 库里有 5 万条源台账 + 全部配置，NAS 单点、没有别的备份手段。
+  // 用 SQLite 的在线备份 API（不锁库），保留最近 7 份。
+  if (storage instanceof SQLiteStorage) {
+    const dataDir = path.resolve(process.env.DATA_DIR || path.join(process.cwd(), 'data'));
+    const backupDir = path.join(dataDir, 'backup');
+    const runBackup = async () => {
+      try {
+        if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+        const stamp = new Date().toISOString().replace(/[:T]/g, '').slice(0, 13); // yyyymmddHHmm
+        const dest = path.join(backupDir, `tvbox-${stamp}.db`);
+        await storage.backupTo(dest);
+        const files = fs.readdirSync(backupDir).filter((f) => f.startsWith('tvbox-') && f.endsWith('.db')).sort();
+        for (const f of files.slice(0, Math.max(0, files.length - 7))) {
+          fs.unlinkSync(path.join(backupDir, f));
+        }
+        console.log(`[backup] snapshot written: ${dest} (${(fs.statSync(dest).size / 1048576).toFixed(0)}MB, keep 7)`);
+      } catch (err) {
+        console.warn(`[backup] failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+    cron.schedule('30 5 * * *', () => { void runBackup(); });
+    console.log('[backup] scheduled: 30 5 * * * (daily snapshot, keep 7)');
   }
 
   // 读取 KV 中的间隔设置，否则用环境变量/默认值
