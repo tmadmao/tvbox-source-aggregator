@@ -12,7 +12,9 @@ import {
   isRunning,
   clearSpeedMap,
 } from '../core/channel-probe';
-import { addDeadUrls, loadDeadUrls, clearDeadUrls } from '../core/live-deadlist';
+import { addDeadUrls, loadDeadUrls, clearDeadUrls, pruneUnreferencedDeadUrls } from '../core/live-deadlist';
+import { bareUrl } from '../core/live-url';
+import { KV_CHANNEL_MERGED_TREE } from '../core/config';
 
 function verifyAdmin(request: Request, config: AppConfig): boolean {
   const token = config.adminToken;
@@ -124,7 +126,9 @@ export function mountChannelProbeRoutes(app: Hono, deps: ChannelProbeRouteDeps):
 
     const map = await loadSpeedMap(storage);
     const dead = Object.entries(map)
-      .filter(([, entry]) => entry.kind === 'fail')
+      // 至少连续两轮失败才进黑名单：单轮失败可能只是网络抖一下，
+      // 而黑名单一旦命中，整台就从输出里消失了。
+      .filter(([, entry]) => entry.kind === 'fail' && (entry.consecutiveFails ?? entry.fails ?? 1) >= 2)
       .map(([url]) => url);
 
     if (dead.length === 0) {
@@ -151,5 +155,23 @@ export function mountChannelProbeRoutes(app: Hono, deps: ChannelProbeRouteDeps):
       });
     }
     return c.json({ success: true, cleared: before.length });
+  });
+
+  // POST /admin/channel-probe/prune-dead — 按引用剪枝：删掉已不在任何源里的死链
+  // 返回剪枝前后的条数与按域名统计，方便看清「谁把名单撑大的」
+  app.post('/admin/channel-probe/prune-dead', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+
+    const rawTree = await storage.get(KV_CHANNEL_MERGED_TREE);
+    if (!rawTree) return c.json({ error: '还没有频道树，先跑一次聚合' }, 400);
+
+    let groups: Array<{ channels?: Array<{ urls?: string[] }> }> = [];
+    try { groups = JSON.parse(rawTree); } catch { return c.json({ error: '频道树解析失败' }, 500); }
+
+    const referenced = new Set<string>();
+    for (const g of groups) for (const ch of g.channels || []) for (const u of ch.urls || []) referenced.add(bareUrl(u));
+
+    const result = await pruneUnreferencedDeadUrls(storage, referenced);
+    return c.json({ success: true, ...result, referenced: referenced.size });
   });
 }

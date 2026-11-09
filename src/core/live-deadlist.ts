@@ -66,6 +66,27 @@ export async function removeRecoveredUrls(storage: Storage, urls: string[]): Pro
   return removed;
 }
 
+/**
+ * 按引用剪枝：把「已经不在任何源里」的死链删掉。
+ *
+ * 为什么必须做：黑名单靠「测速又测到可用」自愈，但孤儿 URL 根本不会进测速
+ * （它已经不在频道树里了），所以永远自愈不了、永远占着位置。
+ * 实测 49808 条里有 37757 条（75.8%）是孤儿，其中一个域名就占 32753 条。
+ *
+ * 删除是安全的：若这些地址以后重新出现在源里、并且确实是死的，会被重新写回来。
+ */
+export async function pruneUnreferencedDeadUrls(
+  storage: Storage,
+  referenced: Set<string>,
+): Promise<{ before: number; after: number; removed: number }> {
+  const existing = await loadDeadUrls(storage);
+  if (existing.length === 0) return { before: 0, after: 0, removed: 0 };
+  const next = existing.filter((u) => referenced.has(u));
+  const removed = existing.length - next.length;
+  if (removed > 0) await saveDeadUrls(storage, next);
+  return { before: existing.length, after: next.length, removed };
+}
+
 export async function clearDeadUrls(storage: Storage): Promise<void> {
   await storage.put(KV_LIVE_DEAD_URLS, JSON.stringify([]));
 }

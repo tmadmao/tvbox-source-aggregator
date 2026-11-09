@@ -8,7 +8,7 @@ import { batchSiteSpeedTest, appendSpeedToName, filterUnreachableSites, type Sit
 import { macCMSToTVBoxSites, processMacCMSForLocal } from './core/maccms';
 import { rewriteJarUrls } from './core/jar-proxy';
 import { mergeLivesToNative, separatedMergeLives, formatLiveGroupsAsTxt, type LiveSourceInput } from './core/live-merger';
-import { loadDeadUrls, purgeProtectedUrls } from './core/live-deadlist';
+import { loadDeadUrls, purgeProtectedUrls, pruneUnreferencedDeadUrls } from './core/live-deadlist';
 import { reverifyHeadSources } from './core/live-verify';
 import { withProbeNet } from './core/probe-net';
 import { trimGroupsToTopN } from './core/live-url';
@@ -537,6 +537,19 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
     if (revivedProtected > 0) {
       logger.infoFields('aggregation', 'dead-list-protected-revived', { urls: revivedProtected });
     }
+
+    // 再按引用剪枝：不在当前树里的死链永远不会被重测、也就永远不会自愈，留着只是占地方
+    const referenced = new Set<string>();
+    for (const group of merged.lives as Array<{ channels?: Array<{ urls?: string[] }> }>) {
+      for (const ch of group.channels || []) {
+        for (const u of ch.urls || []) referenced.add(bareUrl(u));
+      }
+    }
+    const pruned = await pruneUnreferencedDeadUrls(storage, referenced);
+    if (pruned.removed > 0) {
+      logger.infoFields('aggregation', 'dead-list-pruned', pruned);
+    }
+
     const deadUrls = await loadDeadUrls(storage);
     if (deadUrls.length > 0) {
       const deadSet = new Set(deadUrls);
