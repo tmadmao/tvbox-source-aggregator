@@ -27,6 +27,7 @@ import { fetchAndParseLiveUrls } from './live-merger';
 import { loadFtpConfig, uploadLiveTxt } from './ftp-sync';
 import { formatLiveGroupsAsTxt } from './live-merger';
 import { loadAlertConfig, sendAlert } from './alerts';
+import { loadDeadRows, removeRecoveredUrls, touchProbed } from './live-deadlist';
 import {
   KV_MERGED_CONFIG,
   KV_CHANNEL_MERGED_TREE,
@@ -67,6 +68,8 @@ export interface GuardResult {
   addedUrls: number;
   gaps: GuardGap[];
   published: boolean;
+  /** 本轮从死源台账里复活的 URL 数 */
+  revived?: number;
   elapsedMs: number;
   note?: string;
 }
@@ -216,6 +219,12 @@ export async function runQualityGuard(storage: Storage, opts: GuardOptions = {})
   } catch { /* ignore */ }
   const poolMap = buildPoolMap(tree, rules);
 
+  // 死源台账：守夜测到复活就移出、测到仍死就刷新回测时间。
+  // 只更新单个 URL，不动域名台账 —— 守夜样本太小，不足以给整个域名下结论。
+  const ledger = new Set((await loadDeadRows(storage)).map((r) => r.url));
+  const recovered = new Set<string>();
+  const stillDead = new Set<string>();
+
   const tasks: Task[] = [];
   const collect = (withPool: boolean) => {
     for (const group of lives) {
@@ -258,14 +267,20 @@ export async function runQualityGuard(storage: Storage, opts: GuardOptions = {})
   let addedUrls = 0;
   let partial = false;
 
-  const probeOne = async (task: Task, url: string): Promise<void> => {
+  const probeOne = async (task: Task, url: string): Promise<boolean> => {
     const r = await raceTimeout(probeUrlOnce(url), PROBE_HARD_TIMEOUT_MS);
     task.probed++;
     probed++;
-    if (!r) return;                         // 硬超时：不写结论，下一轮再来
+    if (!r) return false;                   // 硬超时：不写结论，下一轮再来
+    // 与全量测速、输出前复核共用同一个健康写入点：
+    // okCount/failCount/history/consecutiveFails/lastOkAt 都在这里更新
     const entry = recordProbe(map, url, r);
     entry.ruleVer = CHANNEL_PROBE_RULE_VERSION;
     entry.samples = 1;
+    const ok = r.kind !== 'fail';
+    if (ok) recovered.add(url);
+    else if (ledger.has(url)) stillDead.add(url);
+    return ok;
   };
 
   const probeInto = async (task: Task, candidates: string[]): Promise<number> => {
@@ -387,6 +402,14 @@ export async function runQualityGuard(storage: Storage, opts: GuardOptions = {})
     gaps = tasks.filter((t) => t.afterVerified < t.quota);
     if (probed > 0) await saveSpeedMap(storage, map);
 
+    // 与死源台账互通：复活即出档，仍死则把 7/30 天回测周期从这次重新计时
+    let revived = 0;
+    if (recovered.size > 0) {
+      revived = await removeRecoveredUrls(storage, [...recovered]);
+      if (revived > 0) console.log(`[guard] ${revived} URLs recovered, removed from dead ledger`);
+    }
+    if (stillDead.size > 0) await touchProbed(storage, [...stillDead]);
+
     let published = false;
     if (changed > 0) {
       await storage.put(KV_MERGED_CONFIG, JSON.stringify(full));
@@ -446,6 +469,7 @@ export async function runQualityGuard(storage: Storage, opts: GuardOptions = {})
       addedUrls,
       gaps: gaps.map((g) => ({ group: g.group.group || '', name: g.name, tier: g.tier, verified: g.afterVerified, quota: g.quota })),
       published,
+      revived,
       elapsedMs: Date.now() - started,
     };
     await storage.put(KV_LIVE_GUARD_REPORT, JSON.stringify({ at: new Date().toISOString(), ...result }));

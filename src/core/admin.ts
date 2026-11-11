@@ -3566,6 +3566,7 @@ function renderGuardReport(g) {
     + ' · 补测 ' + (g.probed || 0) + ' 条'
     + ' · 修复 ' + (g.repaired || 0) + ' 台'
     + ' · 新源 ' + (g.addedUrls || 0) + ' 条'
+    + ' · 台账复活 ' + (g.revived || 0) + ' 条'
     + ' · 缺口 ' + ((g.gaps && g.gaps.length) || 0)
     + (g.published ? ' · 已重新发布' : '');
   $('guardReport').textContent = line;

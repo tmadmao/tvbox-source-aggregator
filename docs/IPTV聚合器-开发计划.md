@@ -44,7 +44,10 @@
      不够配额时从**完整源池**继续实测补位（央视最多翻 18 条、卫视 14、地方 8），
      补不到记入缺口报表 `live_quality_gap`，只列央视/卫视/有 2 条以上候选的地方台
   → **源质量守夜**（`quality-guard`，每小时 :20）：重点台头部源超过 1 小时未验或有缺口 →
-     立刻重验；缺口从完整源池补，池子不够就重新下载直播源列表找新地址；
+     立刻重验；**探测结果走 `source-health.recordProbe`**（okCount/failCount/history/
+     consecutiveFails/lastOkAt），排序继续用 tier/score，和全量测速完全同一套健康口径；
+     测到复活自动移出死源台账，仍死则刷新 7/30 天回测时钟；
+     缺口从完整源池补，池子不够就重新下载直播源列表找新地址；
      有改善才发布（KV + FTP），质量只升不降；连续 3 轮「央视/卫视可播 ≤1」才告警
   → **重点频道编排**（`channel-curation`）：央视 / 卫视 / 境内地方 三组按台号与地域重排，
      同名异写合并、错组频道归位、伪 CCTV 清出，南京地方台固定置顶境内地方
@@ -116,7 +119,7 @@
 | 14 | 数据库备份 | 应用内 cron `30 5 * * *`，SQLite 在线备份，保留 7 份 |
 | 13 | 分级源质量保障（原「单源频道补源」） | `GET /admin/quality-gap`：央视 18 台全部达标；输出 8 组 / 659 台 / 1590 源，**0 条死链**；CCTV5+ 8 条源（43~379ms）；付费/海外/4K8K 已删 |
 | 15 | 调度执行历史与告警 | `GET /admin/run-history`：聚合 + 守夜都进记录；守夜实测 `7.2s / 检查 36 台 / 改 16 台 / 已发布`；逐日 ✓/✕；Webhook / Telegram，06:30 漏跑自检（只认聚合） |
-| 16 | 自动化测试 | `npm test` → **50 个用例全过**（channel-tier / curation / ledger / host-health / run-history） |
+| 16 | 自动化测试 | `npm test` → **55 个用例全过**（channel-tier / curation / ledger / host-health / run-history） |
 | 17 | 编排规则外置 | `GET/PUT/DELETE /admin/curation-rules`；改卫视顺序 → 下一次聚合生效，重启仍保留 |
 | 18 | 镜像防回退 | 镜像 `tvbox-aggregator:<sha>`（带 revision 标签），容器只挂 `data`；重建后 `/version` 与构建 commit 一致（实测 2.2.0） |
 
