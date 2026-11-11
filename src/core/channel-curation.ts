@@ -568,15 +568,25 @@ export async function saveOverrides(storage: Storage, map: OverrideMap): Promise
  */
 export function isExcludedChannel(group: string, name: string, rules: CurationRules): boolean {
   const k = key(name);
-  if (rules.keepChannels.some((x) => key(x) === k)) return false;
+  // 排查看「源里的写法」和「编排后的正式名」两种：
+  // 源里写 CCTV4 AMERICA / CCTV央视文体精品，要到 canonicalize 才会变成
+  // CCTV4美洲 / 央视文体精品，只按原名匹配会漏掉。
+  const alias = DEFAULT_COMPILED.cctvAlias.get(k)
+    || DEFAULT_COMPILED.satAlias.get(k)
+    || DEFAULT_COMPILED.nanjingAlias.get(k)
+    || '';
+  const names = [cleanLiveName(name), alias].filter(Boolean);
+  const keys = names.map(key);
+
+  if (rules.keepChannels.some((x) => keys.includes(key(x)))) return false;
 
   if (rules.excludeOverseas && rules.overseasGroups.some((g) => key(g) === key(group))) return true;
 
-  if (rules.excludePaid && rules.paidChannels.some((p) => key(p) === k)) return true;
+  if (rules.excludePaid && rules.paidChannels.some((p) => keys.includes(key(p)))) return true;
 
   if (rules.excludeOverseas) {
-    const s = cleanLiveName(name).toUpperCase();
-    if (rules.overseasKeywords.some((kw) => kw && s.includes(kw.toUpperCase()))) return true;
+    const upper = names.map((n) => n.toUpperCase());
+    if (rules.overseasKeywords.some((kw) => kw && upper.some((s) => s.includes(kw.toUpperCase())))) return true;
   }
   return false;
 }
