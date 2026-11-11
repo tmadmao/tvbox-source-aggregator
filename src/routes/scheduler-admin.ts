@@ -8,7 +8,10 @@ import type { Storage } from '../storage/interface';
 import type { AppConfig } from '../core/types';
 import { loadRunHistory, summarizeRuns, pruneRuns } from '../core/run-history';
 import { loadAlertConfig, saveAlertConfig, sendAlert, normalizeAlertConfig } from '../core/alerts';
-import { KV_LIVE_QUALITY_GAP, KV_LIVE_QUALITY_GUARANTEE, KV_RUN_HISTORY } from '../core/config';
+import {
+  KV_LIVE_QUALITY_GAP, KV_LIVE_QUALITY_GUARANTEE, KV_RUN_HISTORY,
+  KV_LIVE_GUARD_ENABLED, KV_LIVE_GUARD_REPORT, KV_LIVE_GUARD_STATE,
+} from '../core/config';
 
 function verifyAdmin(request: Request, config: AppConfig): boolean {
   const token = config.adminToken;
@@ -19,10 +22,11 @@ function verifyAdmin(request: Request, config: AppConfig): boolean {
 export interface SchedulerRouteDeps {
   storage: Storage;
   config: AppConfig;
+  isSyncing?: () => boolean;
 }
 
 export function mountSchedulerRoutes(app: Hono, deps: SchedulerRouteDeps): void {
-  const { storage, config } = deps;
+  const { storage, config, isSyncing } = deps;
 
   // GET /admin/run-history — 最近 7 天的调度执行记录 + 汇总
   app.get('/admin/run-history', async (c) => {
@@ -77,15 +81,59 @@ export function mountSchedulerRoutes(app: Hono, deps: SchedulerRouteDeps): void 
   // GET /admin/quality-gap — 最近一次分级质量保障的缺口报表
   app.get('/admin/quality-gap', async (c) => {
     if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
-    const [raw, enabled] = await Promise.all([
+    const [raw, enabled, guardRaw, guardEnabled] = await Promise.all([
       storage.get(KV_LIVE_QUALITY_GAP),
       storage.get(KV_LIVE_QUALITY_GUARANTEE),
+      storage.get(KV_LIVE_GUARD_REPORT),
+      storage.get(KV_LIVE_GUARD_ENABLED),
     ]);
     let report: unknown = null;
+    let guard: unknown = null;
     if (raw) {
       try { report = JSON.parse(raw); } catch { report = null; }
     }
-    return c.json({ enabled: enabled !== 'false', report });
+    if (guardRaw) {
+      try { guard = JSON.parse(guardRaw); } catch { guard = null; }
+    }
+    return c.json({
+      enabled: enabled !== 'false',
+      report,
+      guardEnabled: guardEnabled !== 'false',
+      guard,
+    });
+  });
+
+  // GET / PUT /admin/quality-guard — 全自动守夜开关 + 最近一次结果
+  app.get('/admin/quality-guard', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    const [enabled, reportRaw, stateRaw] = await Promise.all([
+      storage.get(KV_LIVE_GUARD_ENABLED),
+      storage.get(KV_LIVE_GUARD_REPORT),
+      storage.get(KV_LIVE_GUARD_STATE),
+    ]);
+    let report: unknown = null;
+    let state: unknown = null;
+    try { report = reportRaw ? JSON.parse(reportRaw) : null; } catch { /* ignore */ }
+    try { state = stateRaw ? JSON.parse(stateRaw) : null; } catch { /* ignore */ }
+    return c.json({ enabled: enabled !== 'false', report, state });
+  });
+
+  app.put('/admin/quality-guard', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    const body = await c.req.json<{ enabled?: boolean }>();
+    if (typeof body.enabled !== 'boolean') return c.json({ error: 'enabled must be boolean' }, 400);
+    await storage.put(KV_LIVE_GUARD_ENABLED, body.enabled ? 'true' : 'false');
+    return c.json({ success: true, enabled: body.enabled });
+  });
+
+  // POST /admin/quality-guard/run — 立即自检一次（不等整点）
+  app.post('/admin/quality-guard/run', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    if (isSyncing && isSyncing()) return c.json({ success: false, error: '聚合进行中，稍后再试' }, 409);
+    const { runQualityGuard } = await import('../core/quality-guard');
+    const { withProbeNet } = await import('../core/probe-net');
+    const result = await withProbeNet(() => runQualityGuard(storage));
+    return c.json({ success: true, result });
   });
 
   // PUT /admin/quality-guarantee — 质量保障总开关

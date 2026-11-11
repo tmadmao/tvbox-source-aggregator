@@ -520,6 +520,15 @@ ${sharedStyles}
         <span>启用输出前补测（关闭后只按上一轮测速结果排序）</span>
         <span class="status-text" id="qualityStatus" style="font-family:var(--mono);font-size:0.75rem"></span>
       </label>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:0.82rem">
+        <label style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="guardEnabled" onchange="saveGuardToggle()">
+          <span>全自动守夜（每小时重验重点台头部源，缺源自动补测并发布）</span>
+        </label>
+        <button class="btn btn-sm" onclick="runGuardNow()">立即自检</button>
+        <span class="status-text" id="guardStatus" style="font-family:var(--mono);font-size:0.75rem"></span>
+      </div>
+      <div id="guardReport" style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:8px"></div>
       <div id="qualityGaps" style="max-height:300px;overflow:auto"></div>
     </div>
 
@@ -3400,7 +3409,7 @@ async function loadRunHistory() {
       if (!detail && r.note) detail = esc(r.note);
       html += '<tr style="border-bottom:1px solid var(--border)">';
       html += '<td style="padding:6px;font-family:var(--mono)">' + fmtLocal(r.startedAt) + '</td>';
-      html += '<td>' + (r.kind === 'aggregate' ? '聚合' : r.kind === 'probe' ? '测速' : '备份') + '</td>';
+      html += '<td>' + (r.kind === 'aggregate' ? '聚合' : r.kind === 'probe' ? '测速' : r.kind === 'guard' ? '守夜' : '备份') + '</td>';
       html += '<td>' + (RUN_TRIGGER_LABEL[r.trigger] || r.trigger) + '</td>';
       html += '<td style="color:' + runColor(r.status) + ';font-weight:600">' + (RUN_STATUS_LABEL[r.status] || r.status) + '</td>';
       html += '<td style="font-family:var(--mono)">' + fmtDuration(r.durationMs) + '</td>';
@@ -3503,6 +3512,8 @@ async function loadQuality() {
     var res = await auth.authFetch('/admin/quality-gap');
     var d = await res.json();
     $('qualityEnabled').checked = d.enabled !== false;
+    $('guardEnabled').checked = d.guardEnabled !== false;
+    renderGuardReport(d.guard);
     var report = d.report;
     if (!report) {
       $('qualitySummary').innerHTML = '<span style="color:var(--text-dim)">还没有质量报告（跑一次聚合后生成）。</span>';
@@ -3541,6 +3552,50 @@ async function loadQuality() {
     t += '</table>';
     $('qualityGaps').innerHTML = t;
   } catch (e) {}
+}
+
+function renderGuardReport(g) {
+  if (!g) {
+    $('guardReport').textContent = '守夜还未运行过（每小时 :20 自动跑，也可点「立即自检」）。';
+    return;
+  }
+  var t = g.state === 'done' ? '有修复' : g.state === 'partial' ? '预算用完' : g.state === 'skipped' ? '已跳过' : '无变化';
+  var line = '最近守夜 ' + fmtLocal(g.at) + ' · ' + t
+    + ' · 检查 ' + (g.checked || 0) + ' 台'
+    + ' · 补测 ' + (g.probed || 0) + ' 条'
+    + ' · 修复 ' + (g.repaired || 0) + ' 台'
+    + ' · 新源 ' + (g.addedUrls || 0) + ' 条'
+    + ' · 缺口 ' + ((g.gaps && g.gaps.length) || 0)
+    + (g.published ? ' · 已重新发布' : '');
+  $('guardReport').textContent = line;
+}
+
+async function saveGuardToggle() {
+  var enabled = $('guardEnabled').checked;
+  try {
+    await auth.authFetch('/admin/quality-guard', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled }) });
+    $('guardStatus').textContent = enabled ? '已开启' : '已关闭';
+    setTimeout(function() { $('guardStatus').textContent = ''; }, 2000);
+  } catch (e) {
+    $('guardStatus').textContent = '保存失败';
+  }
+}
+
+async function runGuardNow() {
+  $('guardStatus').textContent = '守夜运行中…';
+  try {
+    var res = await auth.authFetch('/admin/quality-guard/run', { method: 'POST' });
+    var d = await res.json();
+    if (d.success) {
+      $('guardStatus').textContent = '完成';
+      loadQuality();
+    } else {
+      $('guardStatus').textContent = d.error || '失败';
+    }
+  } catch (e) {
+    $('guardStatus').textContent = '失败';
+  }
+  setTimeout(function() { $('guardStatus').textContent = ''; }, 3000);
 }
 
 async function saveQualityToggle() {

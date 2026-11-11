@@ -23,8 +23,10 @@ import type { Storage } from './storage/interface';
 import type { AppConfig } from './core/types';
 import { beginRun, finishRun, loadRunHistory, summarizeRuns, type RunStatus, type RunTrigger } from './core/run-history';
 import { loadAlertConfig, notifyRunFinished, notifyMissedRun } from './core/alerts';
-import { KV_MERGED_CONFIG } from './core/config';
+import { KV_MERGED_CONFIG, KV_LIVE_GUARD_ENABLED, LIVE_GUARD_CRON } from './core/config';
 import { APP_VERSION, APP_COMMIT } from './core/version';
+import { runQualityGuard } from './core/quality-guard';
+import { withProbeNet } from './core/probe-net';
 
 // 加载 .env（嵌入式/无文件系统环境下容错：nodejs-mobile 无 .env，依赖注入的环境变量）
 try {
@@ -283,6 +285,38 @@ async function main() {
     }
   });
   console.log(`[channel-probe-cron] Scheduled: ${CHANNEL_PROBE_CRON} (runs when enabled)`);
+
+  // 源质量守夜：每小时自动重验重点台头部源、补缺口、发现新地址并重新发布。
+  // 这是「全自动维护」的主循环，不需要人点按钮。
+  cron.schedule(LIVE_GUARD_CRON, async () => {
+    try {
+      if (refreshRunning) return;                                  // 聚合优先，守夜让路
+      if ((await storage.get(KV_LIVE_GUARD_ENABLED)) === 'false') return;
+      const rec = await beginRun(storage, 'guard', 'cron', '源质量守夜');
+      try {
+        const r = await withProbeNet(() => runQualityGuard(storage));
+        await finishRun(storage, rec.id, {
+          status: r.state === 'skipped' ? 'skipped' : 'success',
+          note: r.state,
+          stats: {
+            checked: r.checked, probed: r.probed, repaired: r.repaired,
+            changed: r.changed, added: r.addedUrls, gaps: r.gaps.length,
+            published: r.published ? 1 : 0,
+          },
+        });
+        if (r.state === 'done') {
+          console.log(`[guard] repaired=${r.repaired} changed=${r.changed} probed=${r.probed} ${Math.round(r.elapsedMs / 1000)}s`);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await finishRun(storage, rec.id, { status: 'failed', error: msg });
+        throw err;
+      }
+    } catch (err) {
+      console.error('[guard] Error:', err instanceof Error ? err.message : String(err));
+    }
+  });
+  console.log(`[guard] Scheduled: ${LIVE_GUARD_CRON} (hourly, auto repair)`);
 
   // 漏跑自检：每天 06:30（北京时间）检查「昨天 5 点跑没跑」，启动后再补一次
   cron.schedule('30 6 * * *', () => { void checkMissedRun(); });

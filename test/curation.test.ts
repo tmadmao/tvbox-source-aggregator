@@ -9,6 +9,7 @@ import {
   buildUrlTierMap,
   isExcludedChannel,
   applyChannelExclusions,
+  canonicalChannelName,
   DEFAULT_CURATION_RULES,
 } from '../src/core/channel-curation';
 import type { ChannelSpeedEntry, ChannelSpeedMap, TVBoxLiveGroup } from '../src/core/types';
@@ -143,6 +144,9 @@ test('isExcludedChannel：付费台与海外台删除，CCTV5+ 例外保留', ()
   assert.equal(isExcludedChannel('央视', 'CCTV1', r), false);
   assert.equal(isExcludedChannel('央视', '兵器科技', r), true);
   assert.equal(isExcludedChannel('央视', 'CCTV4美洲', r), true);
+  assert.equal(isExcludedChannel('央视', 'CCTV4K', r), true);
+  assert.equal(isExcludedChannel('央视', 'CCTV8K', r), true);
+  assert.equal(isExcludedChannel('央视', 'CCTV16-4K', r), true);
   assert.equal(isExcludedChannel('央视', 'CCTV4 AMERICA', r), true);
   assert.equal(isExcludedChannel('央视', 'CCTV央视文体精品', r), true);
   assert.equal(isExcludedChannel('央视', 'CGTN纪录', r), true);
@@ -185,6 +189,12 @@ test('curateGroups：排除规则在编排阶段再兜一层（老 KV 树也能�
   assert.equal(res.excluded, 2);
   assert.deepEqual(res.groups.map((g) => g.group), ['央视']);
   assert.deepEqual(res.groups[0].channels.map((c) => c.name), ['CCTV1']);
+});
+
+test('canonicalChannelName：源侧写法与编排正式名对齐', () => {
+  assert.equal(canonicalChannelName('CCTV4 AMERICA'), 'CCTV4美洲');
+  assert.equal(canonicalChannelName('CCTV-5+体育'), 'CCTV5+');
+  assert.equal(canonicalChannelName('江苏·南京新闻'), '南京新闻综合');
 });
 
 test('buildUrlTierMap：同一 URL 取最高档位', () => {

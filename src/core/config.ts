@@ -100,6 +100,19 @@ export const KV_LIVE_QUALITY_GAP = 'live_quality_gap';         // 最近一次�
 /** 缺口补测整轮预算：央视→卫视→重点地方台，超时收工不拖垮聚合 */
 export const QUALITY_GUARANTEE_BUDGET_MS = 8 * 60 * 1000;
 
+// ═══ 源质量守夜（全自动维护）═══════════════════════════
+export const KV_LIVE_GUARD_ENABLED = 'live_guard_enabled';   // 默认开
+export const KV_LIVE_GUARD_REPORT = 'live_guard_report';     // 最近一次守夜结果
+export const KV_LIVE_GUARD_STATE = 'live_guard_state';       // 连续缺口计数（用于告警）
+/** 守夜间隔：每小时一次（只看将过期/有缺口的台，成本很低） */
+export const LIVE_GUARD_CRON = '20 * * * *';
+/** 头部源复核新鲜度：超过 3 小时就重新验一次 */
+export const GUARD_STALE_MS = 3 * 3600 * 1000;
+export const GUARD_BUDGET_MS = 8 * 60 * 1000;
+export const GUARD_CONCURRENCY = 6;
+/** 连续多少轮仍有缺口才告警（避免一次抖动就叫人） */
+export const GUARD_ALERT_AFTER = 3;
+
 
 // 背景设置
 export const KV_BG_SETTINGS = 'bg_settings';

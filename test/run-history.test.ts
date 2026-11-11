@@ -87,6 +87,19 @@ test('summarizeRuns：今晨成功则不告警', () => {
   assert.equal(s.today.success, 1);
 });
 
+test('summarizeRuns：守夜成功不能掩盖「聚合没跑」', () => {
+  const now = Date.parse('2026-11-11T12:00:00+08:00');
+  const runs = [
+    run('2026-11-11T05:00:00+08:00', 'failed'),
+    { ...run('2026-11-11T11:20:00+08:00', 'success'), kind: 'guard' as const },
+  ];
+  const s = summarizeRuns(runs, now, 'Asia/Shanghai');
+  assert.equal(s.stale, true);
+  assert.equal(s.consecutiveFailures, 1);
+  assert.equal(s.today.success, 0);
+  assert.equal(s.today.failed, 1);
+});
+
 test('RUN_STALE_MS 是 26 小时', () => {
   assert.equal(RUN_STALE_MS, 26 * 3600 * 1000);
 });

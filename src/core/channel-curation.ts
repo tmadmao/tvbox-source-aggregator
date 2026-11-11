@@ -106,7 +106,7 @@ const PROVINCE_ORDER = [
 ];
 
 /**
- * 付费频道：都是需要单独订购的数字付费频道，实际没人看，还占着央视组的位置。
+ * 付费频道 + 4K/8K：都是实际没人看的台，还占着央视组的位置。
  * 用户 2026-11-11 明确要求删除；CCTV5+ 不在名单里（免费的体育赛事频道）。
  */
 const PAID_CHANNELS = [
@@ -114,6 +114,8 @@ const PAID_CHANNELS = [
   '发现之旅', '风云剧场', '风云音乐', '风云足球', '高尔夫网球', '怀旧剧场',
   '老故事', '女性时尚', '世界地理', '卫生健康', '文化精品', '央视高网',
   '央视台球', '中学生', 'CCTV★移动传媒', 'CCTV+', 'CCTV+1', 'CCTV+2',
+  // 4K/8K 用户明确说没必要：带宽要求高、可用源少，留着只会占缺口
+  'CCTV4K', 'CCTV8K', 'CCTV16-4K',
 ];
 
 /** 海外分组：整组删除（含港澳台、日韩、国际新闻） */
@@ -399,6 +401,15 @@ export function tierOfChannel(
 ): ChannelTier {
   const C = rules ? compileRules(normalizeRules(rules)) : DEFAULT_COMPILED;
   return tierIn(group, name, C);
+}
+
+/**
+ * 编排后的正式名：`CCTV-4 AMERICA → CCTV4美洲`、`海峡卫视 → 海峡卫视`。
+ * 守夜模块用它在「输出频道」和「完整源池」之间对齐同一个台。
+ */
+export function canonicalChannelName(name: string, rules?: CurationRules): string {
+  const C = rules ? compileRules(normalizeRules(rules)) : DEFAULT_COMPILED;
+  return cctvName(name, C) || satName(name, C) || nanjingName(name, C) || cleanLiveName(name);
 }
 
 /**

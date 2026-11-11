@@ -1961,7 +1961,7 @@ export function createApp(deps: AppDeps): Hono {
     mountChannelOrderRoutes(app, { storage, config, triggerRefresh: deps.triggerRefresh });
     mountChannelRoutes(app, { storage, config, triggerRefresh: deps.triggerRefresh });
     mountHealthRoutes(app, { storage, config });
-    mountSchedulerRoutes(app, { storage, config });
+    mountSchedulerRoutes(app, { storage, config, isSyncing: deps.isSyncing });
     mountCurationRoutes(app, { storage, config, triggerRefresh: deps.triggerRefresh });
   }
 

@@ -13,7 +13,7 @@ import { KV_RUN_HISTORY, RUN_HISTORY_KEEP_MS, RUN_HISTORY_MAX, RUN_STALE_MS } fr
 
 export { RUN_STALE_MS };
 
-export type RunKind = 'aggregate' | 'probe' | 'backup';
+export type RunKind = 'aggregate' | 'probe' | 'backup' | 'guard';
 export type RunStatus = 'running' | 'success' | 'failed' | 'timeout' | 'skipped';
 export type RunTrigger = 'cron' | 'manual' | 'startup' | 'probe';
 
@@ -173,14 +173,16 @@ export function summarizeRuns(
   const all = pruneRuns(closeStaleRunning(runs, now), now);
   const sorted = [...all].sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
   const last = sorted[sorted.length - 1];
-  const successes = sorted.filter((r) => r.status === 'success');
-  const failures = sorted.filter((r) => r.status === 'failed' || r.status === 'timeout');
+  // 「跑没跑」只认聚合：守夜每小时成功一次，不能拿它掩盖「凌晨 5 点没跑」
+  const agg = sorted.filter((r) => r.kind === 'aggregate');
+  const successes = agg.filter((r) => r.status === 'success');
+  const failures = agg.filter((r) => r.status === 'failed' || r.status === 'timeout');
   const lastSuccess = successes[successes.length - 1];
   const lastFailure = failures[failures.length - 1];
 
   let consecutiveFailures = 0;
-  for (let i = sorted.length - 1; i >= 0; i--) {
-    const s = sorted[i].status;
+  for (let i = agg.length - 1; i >= 0; i--) {
+    const s = agg[i].status;
     if (s === 'success') break;
     if (s === 'failed' || s === 'timeout') consecutiveFailures++;
   }
@@ -189,12 +191,12 @@ export function summarizeRuns(
   const stale = !lastOkMs || now - lastOkMs > RUN_STALE_MS;
 
   const todayKey = localDate(now, tz);
-  const todayRuns = sorted.filter((r) => localDate(Date.parse(r.startedAt), tz) === todayKey);
+  const todayRuns = agg.filter((r) => localDate(Date.parse(r.startedAt), tz) === todayKey);
 
   const daily: DailyRun[] = [];
   for (let i = days - 1; i >= 0; i--) {
     const key = localDate(now - i * 24 * 3600 * 1000, tz);
-    const list = sorted.filter((r) => localDate(Date.parse(r.startedAt), tz) === key);
+    const list = agg.filter((r) => localDate(Date.parse(r.startedAt), tz) === key);
     const ok = list.filter((r) => r.status === 'success');
     const bad = list.filter((r) => r.status === 'failed' || r.status === 'timeout');
     daily.push({
