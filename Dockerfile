@@ -17,8 +17,14 @@ COPY package*.json ./
 RUN npm ci --ignore-scripts --registry https://registry.npmmirror.com && \
     npm rebuild esbuild better-sqlite3
 COPY . .
-RUN npm run build:node
+RUN npm run build:node && \
+    npm prune --omit=dev --ignore-scripts
 
+# ── 运行镜像 ───────────────────────────────────────────
+# 不再装 python3/make/g++/tzdata：
+#   · 原生模块直接从 builder 复制（同一个 node:20-alpine，ABI 一致），
+#     省掉一次编译，也不再依赖 apk 网络；
+#   · 时区用 POSIX 写法 CST-8（中国无夏令时），不依赖 /usr/share/zoneinfo。
 FROM node:20-alpine
 
 ARG APP_VERSION=dev
@@ -28,25 +34,18 @@ LABEL org.opencontainers.image.title="tvbox-aggregator" \
       org.opencontainers.image.revision="${APP_COMMIT}"
 ENV APP_VERSION=${APP_VERSION}
 ENV APP_COMMIT=${APP_COMMIT}
-
-RUN apk add --no-cache python3 make g++ tzdata
-
-# 同上：原生模块 rebuild 用镜像自带的 node headers，不依赖外网
-ENV npm_config_nodedir=/usr/local
+ENV TZ=CST-8
 
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci --omit=dev --ignore-scripts --registry https://registry.npmmirror.com && \
-    npm rebuild better-sqlite3 && \
-    apk del python3 make g++
+COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/package.json ./package.json
 
 RUN mkdir -p /app/data
 VOLUME /app/data
 
 ENV PORT=5678
 ENV DATA_DIR=/app/data
-ENV TZ=Asia/Shanghai
 EXPOSE 5678
 
 CMD ["node", "dist/server.js"]

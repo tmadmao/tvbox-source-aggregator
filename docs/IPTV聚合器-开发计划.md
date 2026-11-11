@@ -16,7 +16,7 @@
 - **对外入口**：
   - 局域网 `http://192.168.5.18:5678/live.txt`（302 → `/live-config`，HTTP 缓存 5 分钟）
   - 公网 `http://iptv.new.tg/live.txt`（聚合完成后经 FTP 覆盖上传 `/Web/live.txt`）
-- **调度**：聚合 `0 5 * * *`（容器 `TZ=Asia/Shanghai` → **每天 05:00 北京时间**，不是 UTC）；
+- **调度**：聚合 `0 5 * * *`（容器 `TZ=CST-8` → **每天 05:00 北京时间**，不是 UTC）；
   测速并入聚合（KV `channel_probe_inline`），独立的测速 cron 仅在 inline 关闭时生效；
   **执行历史**记触发方式/开始/结束/状态/耗时/产出，保留 7 天（`run_history`），
   进程被杀留下的悬空记录下次启动自动收尾为「进程中断」；
