@@ -217,3 +217,44 @@ test('buildUrlTierMap：同一 URL 取最高档位', () => {
   assert.equal(m.get('http://x/1'), 'cctv');
   assert.equal(m.get('http://y/2'), 'other');
 });
+
+test('curateGroups：非重点分组也遵守每台上限（其他组的源同样压到 focusSources）', () => {
+  // 实测「其他」组里有个 `纪录` 频道攒了 38 条源 —— 上限原本只对
+  // 央视/卫视/境内地方生效，非重点分组原样透传，用户要求的「最多 20 条」被漏掉。
+  const speedMap: ChannelSpeedMap = {};
+  const urls: string[] = [];
+  for (let i = 0; i < 38; i++) {
+    const u = `http://h${i}.example.com/live.m3u8`;
+    urls.push(`${u}$源${i}`);
+    speedMap[u] = okEntry(500 + i * 10);
+  }
+  const groups: TVBoxLiveGroup[] = [
+    { group: '其他', channels: [{ name: '纪录', urls }] },
+  ];
+
+  const res = curateGroups(groups, {}, speedMap);
+  const ch = res.groups[0].channels[0];
+  assert.equal(ch.name, '纪录');
+  assert.equal(ch.urls.length, QUALITY_MAX_SOURCES, '非重点分组的源数必须被压到上限');
+});
+
+test('curateGroups：非重点分组剔除确认死链，不把失败源留给客户端', () => {
+  const speedMap: ChannelSpeedMap = {};
+  const deadUrl = 'http://dead.example.com/x.m3u8';
+  speedMap[deadUrl] = {
+    ...okEntry(),
+    kind: 'fail',
+    stage: 'playlist',
+    consecutiveFails: 3,
+    fails: 3,
+  };
+  const groups: TVBoxLiveGroup[] = [
+    { group: '其他', channels: [{ name: '某台', urls: [`${deadUrl}$死源`, 'http://ok.example.com/y.m3u8$活源'] }] },
+  ];
+  speedMap['http://ok.example.com/y.m3u8'] = okEntry();
+
+  const res = curateGroups(groups, {}, speedMap);
+  const ch = res.groups[0].channels[0];
+  assert.equal(ch.urls.length, 1);
+  assert.ok(!ch.urls.some((u) => u.startsWith(deadUrl)));
+});

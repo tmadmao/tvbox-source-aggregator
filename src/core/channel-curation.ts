@@ -499,6 +499,22 @@ function rankIn(group: string, name: string, C: CompiledRules): number {
  *   · 前排 quota 条尽量来自不同域名
  *   · 只保留 focusSources 条
  */
+/**
+ * 同一个 URL 被多个源收录时只留一条（`$源名` 不同但地址相同）。
+ * canonicalize 与「非重点分组」的源编排都要用，提到模块级。
+ */
+function dedupeUrls(list: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const u of list) {
+    const b = bareUrl(u);
+    if (!b || seen.has(b)) continue;
+    seen.add(b);
+    out.push(u);
+  }
+  return out;
+}
+
 function canonicalize(
   group: string,
   channels: TVBoxLiveChannel[],
@@ -508,18 +524,7 @@ function canonicalize(
 ): TVBoxLiveChannel[] {
   const merged = new Map<string, { name: string; urls: string[] }>();
 
-  // 同一个 URL 被多个源收录时只留一条（`$源名` 不同但地址相同）
-  const dedupe = (list: string[]): string[] => {
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const u of list) {
-      const b = bareUrl(u);
-      if (!b || seen.has(b)) continue;
-      seen.add(b);
-      out.push(u);
-    }
-    return out;
-  };
+  const dedupe = dedupeUrls;
 
   for (const ch of channels) {
     const canonical =
@@ -773,7 +778,22 @@ export function curateGroups(
       if (before !== chans.length) renamed++;
       chans = sortOnly(group, chans, C);
     } else {
-      chans = chans.map((ch) => ({ ...ch, name: cleanLiveName(ch.name) }));
+      // 非重点分组不做改名/合并，但同样要过一遍源编排：
+      // 「每台最多 20 条」是全局要求，不是只对央视/卫视/地方生效。
+      // 实测「其他」组里有个 `纪录` 频道攒了 38 条源，就是漏掉这里的结果。
+      // 排版上仍按「死链剔除 + 可播优先 + 同域名打散」处理，只是配额取 0（不做保底承诺）。
+      chans = chans.map((ch) => {
+        const name = cleanLiveName(ch.name);
+        const urls = dedupeUrls(ch.urls || []);
+        const arranged = speedMap
+          ? arrangeSources(
+            [...urls].sort((a, b) => compareBySpeed({ url: bareUrl(a) }, { url: bareUrl(b) }, speedMap)),
+            speedMap,
+            { quota: 0, cap: C.rules.focusSources, requireSegment },
+          )
+          : null;
+        return { ...ch, name, urls: arranged && arranged.urls.length > 0 ? arranged.urls : urls };
+      });
     }
 
     // 央视组清创：挂着 CCTV 名头的私人转播源不该占着「央视」分组的前排
