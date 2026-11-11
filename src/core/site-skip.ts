@@ -7,7 +7,7 @@
 import type { Storage } from '../storage/interface';
 import type { TVBoxSite } from './types';
 import { KV_SITE_SKIP_LIST } from './config';
-import { siteFingerprint } from './blacklist';
+import { computeFingerprints } from './blacklist';
 
 const MAX_ENTRIES = 20000;
 
@@ -40,15 +40,12 @@ export async function clearSkipList(storage: Storage): Promise<void> {
   await storage.put(KV_SITE_SKIP_LIST, JSON.stringify([]));
 }
 
-/** 批量算指纹，返回 Set 供过滤 */
+/** 批量算指纹，返回 Set 供过滤（key → fingerprint 的反向视图，供一处计算多处复用） */
 export async function fingerprintSet(sites: TVBoxSite[]): Promise<Map<string, string>> {
   const map = new Map<string, string>(); // fingerprint → site.key
-  for (const site of sites) {
-    try {
-      map.set(await siteFingerprint(site), site.key);
-    } catch {
-      /* 忽略个别失败 */
-    }
+  for (const [key, fp] of await computeFingerprints(sites)) {
+    // siteFpKey 形如 "<key>\u0000<api>"，这里只需要 key 供展示
+    map.set(fp, key.split('\u0000')[0]);
   }
   return map;
 }

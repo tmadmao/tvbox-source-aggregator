@@ -5,15 +5,10 @@
 
 import type { Hono } from 'hono';
 import type { Storage } from '../storage/interface';
+import { verifyAdmin } from '../core/admin-auth';
 import type { AppConfig, ChannelSpeedMap } from '../core/types';
 import { loadSpeedMap } from '../core/channel-probe';
 import { domainSummary, availabilityOf } from '../core/source-health';
-
-function verifyAdmin(request: Request, config: AppConfig): boolean {
-  const token = config.adminToken;
-  if (!token) return false;
-  return request.headers.get('Authorization') === `Bearer ${token}`;
-}
 
 export interface HealthRouteDeps {
   storage: Storage;

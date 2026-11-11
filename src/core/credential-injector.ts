@@ -8,7 +8,18 @@ import { assessSourceRisk, type RiskLevel } from './credential-risk';
 export interface InjectionRule {
   apiPattern: string | RegExp;
   platforms: CloudPlatform[];
-  inject: (ext: any, credentials: Map<CloudPlatform, CloudCredential>, baseUrl?: string) => any;
+  inject: (
+    ext: any,
+    credentials: Map<CloudPlatform, CloudCredential>,
+    ctx: InjectionContext,
+  ) => any;
+}
+
+export interface InjectionContext {
+  /** 本站基址（用于拼自托管 token.json 地址） */
+  baseUrl?: string;
+  /** 已经带路径密钥的 token.json 完整地址；没有就退回 baseUrl 版本 */
+  tokenJsonUrl?: string;
 }
 
 /**
@@ -41,8 +52,20 @@ function restoreExt(obj: Record<string, any>, wasString: boolean, wasJson: boole
   return obj;
 }
 
-function getCredValue(creds: Map<CloudPlatform, CloudCredential>, platform: CloudPlatform, field: string): string {
-  return creds.get(platform)?.credential[field] || '';
+/**
+ * 取某个平台某个字段的值。
+ *
+ * 返回 null 表示「这个平台没登录」——调用方必须跳过赋值，而不是写 ''。
+ * 写 '' 会把源站自带的 token/cookie 清空：用户只登录夸克时，csp_Mogg 里
+ * 阿里云/UC/天翼/百度/123/迅雷 六个字段全被清空，源从「部分可用」变成「完全不可用」。
+ */
+function getCredValue(
+  creds: Map<CloudPlatform, CloudCredential>,
+  platform: CloudPlatform,
+  field: string,
+): string | null {
+  const v = creds.get(platform)?.credential?.[field];
+  return typeof v === 'string' && v.length > 0 ? v : null;
 }
 
 // ─── 内置注入规则表 ─────────────────────────────────────
@@ -53,8 +76,10 @@ const BUILTIN_RULES: InjectionRule[] = [
     apiPattern: /^csp_Bili/,
     platforms: ['bilibili'],
     inject: (ext, creds) => {
+      const v = getCredValue(creds, 'bilibili', 'cookie');
+      if (v === null) return ext;
       const { obj, wasString, wasJson } = parseExt(ext);
-      obj.cookie = getCredValue(creds, 'bilibili', 'cookie');
+      obj.cookie = v;
       return restoreExt(obj, wasString, wasJson);
     },
   },
@@ -63,28 +88,38 @@ const BUILTIN_RULES: InjectionRule[] = [
   {
     apiPattern: /^csp_Wo[bg]g$/,
     platforms: ['aliyun', 'quark', 'uc', 'pan115', 'thunder', 'pikpak'],
-    inject: (ext, creds, baseUrl?: string) => {
+    inject: (ext, creds, ctx) => {
       if (typeof ext !== 'string') return ext;
-      if (!baseUrl) return ext;
+      if (!ctx.baseUrl) return ext;
+      // 优先用带路径密钥的地址（公开路径 = 任何人都能读到明文网盘凭证）
+      const tokenUrl = ctx.tokenJsonUrl || `${ctx.baseUrl}/credential/token.json`;
       // $$$ 分隔格式：token.json_url$$$site_url$$$proxy$$$num$$$config
       // 替换第一段的 token.json URL
-      return ext.replace(/https?:\/\/[^$\s]+token[_.]?json[^$\s]*/i, `${baseUrl}/credential/token.json`);
+      return ext.replace(/https?:\/\/[^$\s]+token[_.]?json[^$\s]*/i, tokenUrl);
     },
   },
 
-  // csp_Mogg: 多字段注入
+  // csp_Mogg: 多字段注入（逐字段判断，未登录的平台保持原值）
   {
     apiPattern: 'csp_Mogg',
     platforms: ['quark', 'aliyun', 'uc', 'tianyi', 'baidu', 'pan123', 'thunder'],
     inject: (ext, creds) => {
       const { obj, wasString, wasJson } = parseExt(ext);
-      if ('cookie' in obj) obj.cookie = getCredValue(creds, 'quark', 'cookie');
-      if ('token' in obj) obj.token = getCredValue(creds, 'aliyun', 'refresh_token');
-      if ('uccookie' in obj) obj.uccookie = getCredValue(creds, 'uc', 'cookie');
-      if ('tyitoken' in obj) obj.tyitoken = getCredValue(creds, 'tianyi', 'cookie');
-      if ('dutoken' in obj) obj.dutoken = getCredValue(creds, 'baidu', 'cookie');
-      if ('p123token' in obj) obj.p123token = getCredValue(creds, 'pan123', 'token');
-      if ('tuctoken' in obj) obj.tuctoken = getCredValue(creds, 'thunder', 'token');
+      const fields: Array<[string, CloudPlatform, string]> = [
+        ['cookie', 'quark', 'cookie'],
+        ['token', 'aliyun', 'refresh_token'],
+        ['uccookie', 'uc', 'cookie'],
+        ['tyitoken', 'tianyi', 'cookie'],
+        ['dutoken', 'baidu', 'cookie'],
+        ['p123token', 'pan123', 'token'],
+        ['tuctoken', 'thunder', 'token'],
+      ];
+      for (const [field, platform, credField] of fields) {
+        if (!(field in obj)) continue;
+        const v = getCredValue(creds, platform, credField);
+        if (v === null) continue;      // 该平台没登录 → 不动源站原值
+        obj[field] = v;
+      }
       return restoreExt(obj, wasString, wasJson);
     },
   },
@@ -94,8 +129,10 @@ const BUILTIN_RULES: InjectionRule[] = [
     apiPattern: 'csp_Pan115',
     platforms: ['pan115'],
     inject: (ext, creds) => {
+      const v = getCredValue(creds, 'pan115', 'cookie');
+      if (v === null) return ext;
       const { obj, wasString, wasJson } = parseExt(ext);
-      obj.cookie = getCredValue(creds, 'pan115', 'cookie');
+      obj.cookie = v;
       return restoreExt(obj, wasString, wasJson);
     },
   },
@@ -138,6 +175,7 @@ export function injectCredentials(
   credentials: Map<CloudPlatform, CloudCredential>,
   policy: CredentialPolicyConfig,
   baseUrl?: string,
+  tokenJsonUrl?: string,
 ): { sites: TVBoxSite[]; report: InjectionReport } {
   const report: InjectionReport = {
     injected: 0,
@@ -190,7 +228,7 @@ export function injectCredentials(
     }
 
     // 执行注入
-    const newExt = rule.inject(site.ext, credentials, baseUrl);
+    const newExt = rule.inject(site.ext, credentials, { baseUrl, tokenJsonUrl });
     report.injected++;
     return { ...site, ext: newExt };
   });

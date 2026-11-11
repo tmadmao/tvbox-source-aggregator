@@ -6,6 +6,7 @@
 
 import type { Hono } from 'hono';
 import type { Storage } from '../storage/interface';
+import { verifyAdmin } from '../core/admin-auth';
 import type { AppConfig } from '../core/types';
 import {
   loadCurationRules,
@@ -15,12 +16,6 @@ import {
   DEFAULT_CURATION_RULES,
 } from '../core/channel-curation';
 import { TIER_LABEL } from '../core/channel-tier';
-
-function verifyAdmin(request: Request, config: AppConfig): boolean {
-  const token = config.adminToken;
-  if (!token) return false;
-  return request.headers.get('Authorization') === `Bearer ${token}`;
-}
 
 export interface CurationRouteDeps {
   storage: Storage;

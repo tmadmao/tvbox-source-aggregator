@@ -3,7 +3,7 @@
 import { Hono } from 'hono';
 import type { Storage } from './storage/interface';
 import type { AppConfig, SourceEntry, MacCMSSourceEntry, LiveSourceEntry, NameTransformConfig, EdgeProxyConfig } from './core/types';
-import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_MANUAL_SOURCES, KV_LAST_UPDATE, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, LIVE_PROXY_TTL, IMG_PROXY_TTL, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_CRON_INTERVAL, DEFAULT_CRON_INTERVAL, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_AGG_LOGS, KV_BG_SETTINGS, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, KV_SMART_BASE_URL_ENABLED, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SITE_HEALTH_MAP, KV_LIVE_HEAD_VERIFY } from './core/config';
+import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_MANUAL_SOURCES, KV_LAST_UPDATE, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, LIVE_PROXY_TTL, IMG_PROXY_TTL, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_CRON_INTERVAL, DEFAULT_CRON_INTERVAL, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_AGG_LOGS, KV_BG_SETTINGS, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, KV_SMART_BASE_URL_ENABLED, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SITE_HEALTH_MAP, KV_LIVE_HEAD_VERIFY, KV_SITE_KEEP_LINK } from './core/config';
 import { getRequestBaseUrl, applyBaseUrlPlaceholder, assertHostAllowed } from './core/base-url';
 import { logger } from './core/logger';
 import { loadGroupOrder, saveGroupOrder } from './core/group-order';
@@ -16,9 +16,12 @@ import { lookupLiveUrl } from './core/live-source';
 import { adminHtml } from './core/admin';
 import { dashboardHtml } from './core/dashboard';
 import { configEditorHtml } from './core/config-editor';
-import { siteFingerprint, loadBlacklist, saveBlacklist, saveRegexRule, deleteRegexRule, updateRegexRule, validateRegexRule, testRegexAgainstSites, applyBlacklist } from './core/blacklist';
+import { siteFingerprintCached, loadBlacklist, saveBlacklist, saveRegexRule, deleteRegexRule, updateRegexRule, validateRegexRule, testRegexAgainstSites, applyBlacklist } from './core/blacklist';
 import { loadSearchQuota, saveSearchQuota } from './core/search-quota';
-import { loadCredentials, saveCredential, deleteCredential, loadCredentialPolicy, saveCredentialPolicy } from './core/credential-store';
+import { loadCredentials, saveCredential, deleteCredential, loadCredentialPolicy, saveCredentialPolicy, ensureCredentialTokenSecret } from './core/credential-store';
+import { verifyAdmin, constantTimeEqual } from './core/admin-auth';
+import { checkPublicUrl, fetchPublic } from './core/net-guard';
+import { KV_CREDENTIAL_TOKEN_SECRET, KV_SITE_FP } from './core/config';
 import { generateQR, pollQRStatus, passwordLogin, PLATFORM_NAMES, QR_PLATFORMS, PASSWORD_PLATFORMS } from './core/cloud-login';
 import { assessAllSources } from './core/credential-risk';
 import { generateTokenJson } from './core/credential-injector';
@@ -63,6 +66,17 @@ function isNativeLiveGroups(lives: unknown): lives is TVBoxLiveGroup[] {
     });
   });
 }
+
+/**
+ * FongMi 格式 live.txt 的短缓存。
+ *
+ * 这类配置的 lives 只是「指针」（type/url/api），每次请求都要逐个下载远端列表再解析。
+ * 而 /live-config 与 /live.txt 都是公网无鉴权的 GET —— 谁都能高频打它，
+ * 把上游站点的请求量放大成我们的出站流量。2 分钟缓存足够挡掉刷量，
+ * 又不会让「刚聚合完」的用户等太久。
+ */
+const LIVE_TXT_CACHE_TTL_MS = 2 * 60 * 1000;
+let liveTxtCache: { key: string; at: number; body: string } | null = null;
 
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono();
@@ -173,13 +187,25 @@ export function createApp(deps: AppDeps): Hono {
           }
         }
         if (liveUrls.length > 0) {
+          const cacheKey = JSON.stringify(liveUrls);
+          if (liveTxtCache && liveTxtCache.key === cacheKey && Date.now() - liveTxtCache.at < LIVE_TXT_CACHE_TTL_MS) {
+            return c.body(liveTxtCache.body, 200, {
+              'Content-Type': 'text/plain; charset=utf-8',
+              'Cache-Control': 'public, max-age=300',
+              'Access-Control-Allow-Origin': '*',
+              'X-Proxy-Cache': 'hit',
+            });
+          }
           try {
             const groups = await fetchAndParseLiveUrls(liveUrls, 8000);
             if (groups.length > 0) {
-              return c.body(formatLiveGroupsAsTxt(groups), 200, {
+              const txt = formatLiveGroupsAsTxt(groups);
+              liveTxtCache = { key: cacheKey, at: Date.now(), body: txt };
+              return c.body(txt, 200, {
                 'Content-Type': 'text/plain; charset=utf-8',
                 'Cache-Control': 'public, max-age=300',
                 'Access-Control-Allow-Origin': '*',
+                'X-Proxy-Cache': 'miss',
               });
             }
           } catch { /* fall through to JSON fallback */ }
@@ -874,16 +900,41 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   // 自托管 token.json
-  app.get('/credential/token.json', async (c) => {
+  // ─── 自托管 token.json（网盘凭证，最高敏感）────────────
+  //
+  // 客户端（FongMi/TVBox）只能裸 GET，带不了 Bearer，所以不能简单加鉴权；
+  // 但一条公开路径 + 明文 Cookie/refresh_token/账号密码 = 任何人（含任意网页 JS）
+  // 都能拿走用户的网盘。原来这里没有鉴权还有 ACAO:*，等于全网可读。
+  //
+  // 现在的模型：
+  //   · /credential/<32hex>/token.json —— 路径段本身就是凭证，不可猜；聚合时自动注入到源 ext
+  //   · /credential/token.json         —— 老路径，改为需要管理 token（手动排障用）
+  // 两条都不再回 Access-Control-Allow-Origin: *（原生客户端不需要 CORS，
+  // 需要跨域读它的只有浏览器，那正是要挡的）。
+  const serveTokenJson = async (): Promise<Response> => {
     const creds = await loadCredentials(storage);
-    if (creds.size === 0) {
-      return c.json({}, 200, { 'Access-Control-Allow-Origin': '*' });
-    }
-    const tokenJson = generateTokenJson(creds);
-    return c.json(tokenJson, 200, {
-      'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'no-cache',
+    const body = creds.size === 0 ? {} : generateTokenJson(creds);
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      },
     });
+  };
+
+  app.get('/credential/:secret/token.json', async (c) => {
+    const provided = c.req.param('secret') || '';
+    const expected = await ensureCredentialTokenSecret(storage);
+    if (!constantTimeEqual(provided, expected)) {
+      return c.json({ error: 'Not Found' }, 404);
+    }
+    return serveTokenJson();
+  });
+
+  app.get('/credential/token.json', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    return serveTokenJson();
   });
 
   // ─── MacCMS API 代理（CF 版 + 本地版）──────────────────────
@@ -1390,9 +1441,20 @@ export function createApp(deps: AppDeps): Hono {
     const overrideSet = new Set(blacklist.regexBlockOverrides);
 
     // Build sites with fingerprint + blocked status + group
+    // 指纹用聚合时在「凭证注入前」算好的那一份：输出配置里的 ext 已被注入改写，
+    // 现算会和黑名单（注入前算）对不上，界面上就会出现「明明拉黑了却不显示已屏蔽」，
+    // 从这里点「屏蔽」写进去的指纹也永远不会命中。
+    let fpCache: Map<string, string> | null = null;
+    try {
+      const rawFp = await storage.get(KV_SITE_FP);
+      if (rawFp) {
+        const parsedFp = JSON.parse(rawFp) as { map?: Record<string, string> };
+        if (parsedFp?.map) fpCache = new Map(Object.entries(parsedFp.map));
+      }
+    } catch { /* 缓存缺失就走现算 */ }
     const sites = [];
     for (const site of parsed.sites || []) {
-      const fp = await siteFingerprint(site);
+      const fp = await siteFingerprintCached(site, fpCache);
       const api = site.api || '';
       let group = '其他';
       if (api.startsWith('csp_') || api.startsWith('py_') || api.startsWith('js_')) {
@@ -1742,6 +1804,9 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   // ─── 刷新 ─────────────────────────────────────────────
+  // 注意：只有配了 REFRESH_TOKEN / ADMIN_TOKEN 才校验。两者都空时这里放行 ——
+  // 即「默认部署任何人可触发聚合」。这是刻意保留的（TVBox 侧/脚本要能触发），
+  // 代价是未配 token 的实例可被外部反复触发重跑；需要收紧就配 ADMIN_TOKEN。
   app.post('/refresh', async (c) => {
     if (config.refreshToken || config.adminToken) {
       const auth = c.req.raw.headers.get('Authorization');
@@ -1763,15 +1828,13 @@ export function createApp(deps: AppDeps): Hono {
   // ─── 输出前复核首位源开关 ──────────────────────────────────
   // 默认开；这条曾因死锁被手工置 false，界面上必须能看见、能改回来
   app.get('/admin/live-head-verify', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
     const raw = await storage.get(KV_LIVE_HEAD_VERIFY);
     return c.json({ enabled: raw !== 'false' });
   });
 
   app.put('/admin/live-head-verify', async (c) => {
-    if (config.adminToken) {
-      const auth = c.req.raw.headers.get('Authorization');
-      if (auth !== `Bearer ${config.adminToken}`) return c.json({ error: 'Unauthorized' }, 401);
-    }
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
     const body = await c.req.json<{ enabled: boolean }>();
     await storage.put(KV_LIVE_HEAD_VERIFY, body.enabled ? 'true' : 'false');
     return c.json({ success: true, enabled: !!body.enabled });
@@ -1779,15 +1842,13 @@ export function createApp(deps: AppDeps): Hono {
 
   // ─── 直播禁用开关 ─────────────────────────────────────────
   app.get('/admin/live-disabled', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
     const raw = await storage.get(KV_LIVE_DISABLED);
     return c.json({ disabled: raw === 'true' });
   });
 
   app.put('/admin/live-disabled', async (c) => {
-    if (config.adminToken) {
-      const auth = c.req.raw.headers.get('Authorization');
-      if (auth !== `Bearer ${config.adminToken}`) return c.json({ error: 'Unauthorized' }, 401);
-    }
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
     if (deps.isSyncing?.()) {
       return c.json({ error: 'Aggregation in progress, try later' }, 409);
     }
@@ -1798,15 +1859,13 @@ export function createApp(deps: AppDeps): Hono {
 
   // ─── 直播合并模式 ─────────────────────────────────────────
   app.get('/admin/live-merge-mode', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
     const raw = await storage.get(KV_LIVE_MERGE_MODE);
     return c.json({ mode: raw || 'separated' });
   });
 
   app.put('/admin/live-merge-mode', async (c) => {
-    if (config.adminToken) {
-      const auth = c.req.raw.headers.get('Authorization');
-      if (auth !== `Bearer ${config.adminToken}`) return c.json({ error: 'Unauthorized' }, 401);
-    }
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
     if (deps.isSyncing?.()) {
       return c.json({ error: 'Aggregation in progress, try later' }, 409);
     }
@@ -1819,15 +1878,13 @@ export function createApp(deps: AppDeps): Hono {
 
   // ─── 智能 Base URL 开关 ──────────────────────────────────
   app.get('/admin/smart-base-url', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
     const raw = await storage.get(KV_SMART_BASE_URL_ENABLED);
     return c.json({ enabled: raw === 'true' });
   });
 
   app.put('/admin/smart-base-url', async (c) => {
-    if (config.adminToken) {
-      const auth = c.req.raw.headers.get('Authorization');
-      if (auth !== `Bearer ${config.adminToken}`) return c.json({ error: 'Unauthorized' }, 401);
-    }
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
     const body = await c.req.json<{ enabled: boolean }>();
     await storage.put(KV_SMART_BASE_URL_ENABLED, body.enabled ? 'true' : 'false');
     return c.json({ success: true, enabled: body.enabled });
@@ -1835,15 +1892,13 @@ export function createApp(deps: AppDeps): Hono {
 
   // ─── 站点验活设置 ───────────────────────────────────────
   app.get('/admin/site-probe-depth', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
     const raw = await storage.get(KV_SITE_PROBE_DEPTH);
     return c.json({ depth: raw || 'deep' });
   });
 
   app.put('/admin/site-probe-depth', async (c) => {
-    if (config.adminToken) {
-      const auth = c.req.raw.headers.get('Authorization');
-      if (auth !== `Bearer ${config.adminToken}`) return c.json({ error: 'Unauthorized' }, 401);
-    }
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
     const body = await c.req.json<{ depth: 'shallow' | 'deep' }>();
     if (!['shallow', 'deep'].includes(body.depth)) return c.json({ error: 'Invalid depth' }, 400);
     await storage.put(KV_SITE_PROBE_DEPTH, body.depth);
@@ -1851,15 +1906,13 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.get('/admin/site-auto-clean', async (c) => {
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
     const raw = await storage.get(KV_SITE_AUTO_CLEAN);
     return c.json({ enabled: raw === 'true' });
   });
 
   app.put('/admin/site-auto-clean', async (c) => {
-    if (config.adminToken) {
-      const auth = c.req.raw.headers.get('Authorization');
-      if (auth !== `Bearer ${config.adminToken}`) return c.json({ error: 'Unauthorized' }, 401);
-    }
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
     const body = await c.req.json<{ enabled: boolean }>();
     await storage.put(KV_SITE_AUTO_CLEAN, body.enabled ? 'true' : 'false');
     return c.json({ success: true, enabled: body.enabled });
@@ -1867,7 +1920,8 @@ export function createApp(deps: AppDeps): Hono {
 
   // 「保留链接」开关 + 跳过名单管理
   app.get('/admin/site-keep-link', async (c) => {
-    const raw = await storage.get('site_keep_link');
+    if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
+    const raw = await storage.get(KV_SITE_KEEP_LINK);
     const skip = await loadSkipList(storage);
     return c.json({ enabled: raw === 'true', skipped: skip.length });
   });
@@ -1875,7 +1929,7 @@ export function createApp(deps: AppDeps): Hono {
   app.put('/admin/site-keep-link', async (c) => {
     if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
     const body = await c.req.json<{ enabled: boolean }>();
-    await storage.put('site_keep_link', body.enabled ? 'true' : 'false');
+    await storage.put(KV_SITE_KEEP_LINK, body.enabled ? 'true' : 'false');
     return c.json({ success: true, enabled: body.enabled });
   });
 
@@ -1975,12 +2029,14 @@ export function createApp(deps: AppDeps): Hono {
   // ─── 图片代理（供 reader 漫画阅读器使用）─────────────────
   app.get('/img-proxy', async (c) => {
     const url = c.req.query('url');
-    if (!url) return c.text('missing url', 400);
+    const check = checkPublicUrl(url);
+    if (!check.ok || !check.url) return c.text(check.reason || 'missing url', 400);
 
-    const referer = c.req.query('referer') || new URL(url).origin + '/';
+    let referer = c.req.query('referer') || check.url.origin + '/';
+    if (!checkPublicUrl(referer).ok) referer = check.url.origin + '/';
 
     try {
-      const resp = await fetch(url, {
+      const resp = await fetchPublic(check.url.toString(), {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Referer': referer,
@@ -2003,11 +2059,15 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   // ─── Reader 通用代理（无 auth，供 reader 后端中转被封站点）──
+  // 无鉴权 + 任意 URL = SSRF 入口（实测可读 127.0.0.1）。这里拦私网/回环/非 http(s)，
+  // 并逐跳校验重定向；公网站点中转能力保持不变。
   app.get('/reader-proxy', async (c) => {
     const url = c.req.query('url');
-    if (!url) return c.text('missing url', 400);
+    const check = checkPublicUrl(url);
+    if (!check.ok || !check.url) return c.text(check.reason || 'missing url', 400);
 
-    const referer = c.req.query('referer') || new URL(url).origin + '/';
+    let referer = c.req.query('referer') || check.url.origin + '/';
+    if (!checkPublicUrl(referer).ok) referer = check.url.origin + '/';
     const cookie = c.req.query('cookie') || '';
 
     const headers: Record<string, string> = {
@@ -2019,7 +2079,7 @@ export function createApp(deps: AppDeps): Hono {
     if (cookie) headers['Cookie'] = cookie;
 
     try {
-      const resp = await fetch(url, { headers });
+      const resp = await fetchPublic(check.url.toString(), { headers });
 
       return new Response(resp.body, {
         status: resp.status,
@@ -2036,9 +2096,3 @@ export function createApp(deps: AppDeps): Hono {
   return app;
 }
 
-function verifyAdmin(request: Request, config: AppConfig): boolean {
-  const token = config.adminToken;
-  if (!token) return false;
-  const auth = request.headers.get('Authorization');
-  return auth === `Bearer ${token}`;
-}

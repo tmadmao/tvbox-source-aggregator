@@ -5,6 +5,7 @@
 
 import type { Hono } from 'hono';
 import type { Storage } from '../storage/interface';
+import { verifyAdmin } from '../core/admin-auth';
 import type { AppConfig, TVBoxLiveGroup } from '../core/types';
 import { KV_MERGED_CONFIG } from '../core/config';
 import {
@@ -24,12 +25,6 @@ import {
   saveShoppingFilter,
   type ShoppingFilterConfig,
 } from '../core/live-filters';
-
-function verifyAdmin(request: Request, config: AppConfig): boolean {
-  const token = config.adminToken;
-  if (!token) return false;
-  return request.headers.get('Authorization') === `Bearer ${token}`;
-}
 
 export interface ChannelOrderRouteDeps {
   storage: Storage;

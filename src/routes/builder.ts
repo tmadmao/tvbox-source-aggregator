@@ -1,5 +1,6 @@
 import type { Hono } from 'hono';
 import type { Storage } from '../storage/interface';
+import { verifyAdmin } from '../core/admin-auth';
 import type { AppConfig, TVBoxConfig } from '../core/types';
 import { KV_MERGED_CONFIG_FULL, KV_SOURCE_MAP } from '../core/config';
 import {
@@ -11,13 +12,6 @@ import {
 } from '../core/builder-store';
 import { exportPresetAsZip } from '../core/builder-export';
 import { builderHtml } from '../core/builder-ui';
-
-function verifyAdmin(request: Request, config: AppConfig): boolean {
-  const token = config.adminToken;
-  if (!token) return false;
-  const auth = request.headers.get('Authorization');
-  return auth === `Bearer ${token}`;
-}
 
 export interface BuilderRouteDeps {
   storage: Storage;

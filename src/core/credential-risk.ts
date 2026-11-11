@@ -151,7 +151,11 @@ interface ExtAnalysis {
   proxyMode: string | null;
 }
 
-function analyzeExt(ext: string | Record<string, unknown>, api: string): ExtAnalysis {
+function analyzeExt(
+  ext: string | Record<string, unknown>,
+  api: string,
+  depth = 0,
+): ExtAnalysis {
   const result: ExtAnalysis = {
     hasCookieFields: false,
     cookieFieldNames: [],
@@ -164,25 +168,25 @@ function analyzeExt(ext: string | Record<string, unknown>, api: string): ExtAnal
     return analyzeStringExt(ext, api);
   }
 
-  // ext 是 JSON 对象
-  for (const key of Object.keys(ext)) {
-    if (COOKIE_FIELD_NAMES.has(key.toLowerCase())) {
-      result.hasCookieFields = true;
-      result.cookieFieldNames.push(key);
-    }
-  }
-
-  // 检查对象中的 URL 值是否指向第三方
-  for (const value of Object.values(ext)) {
-    if (typeof value === 'string') {
-      const domains = extractDomains(value);
-      for (const d of domains) {
-        if (!OFFICIAL_DOMAINS.has(d)) {
-          result.thirdPartyDomains.push(d);
+  // ext 是 JSON 对象：cookie 字段可能嵌在子对象里（{a:{cookie:"x"}}），
+  // 只看第一层会漏判，导致本该 injection-denied 的源被判成 B 类 safe。
+  const collect = (obj: Record<string, unknown>, level: number): void => {
+    for (const [key, value] of Object.entries(obj)) {
+      if (COOKIE_FIELD_NAMES.has(key.toLowerCase())) {
+        result.hasCookieFields = true;
+        result.cookieFieldNames.push(key);
+      }
+      if (typeof value === 'string') {
+        for (const d of extractDomains(value)) {
+          if (!OFFICIAL_DOMAINS.has(d)) result.thirdPartyDomains.push(d);
         }
+      } else if (value && typeof value === 'object' && level < 2) {
+        collect(value as Record<string, unknown>, level + 1);
       }
     }
-  }
+  };
+  collect(ext, depth);
+  result.thirdPartyDomains = [...new Set(result.thirdPartyDomains)];
 
   return result;
 }
@@ -251,15 +255,34 @@ function analyzeStringExt(ext: string, api: string): ExtAnalysis {
   return result;
 }
 
+/** 像文件扩展名的「伪 TLD」：token.json / a.m3u8 这类不该被当成域名 */
+const FILE_LIKE_TLDS = new Set([
+  'json', 'jsonp', 'txt', 'm3u', 'm3u8', 'html', 'htm', 'xml', 'php', 'asp', 'aspx',
+  'jsp', 'ts', 'mp4', 'flv', 'mkv', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg',
+  'css', 'js', 'md', 'db', 'yaml', 'yml', 'ini', 'csv', 'zip', 'apk',
+]);
+
+/**
+ * 从一段文本里提取域名。
+ *
+ * 旧实现只认 `https?://host`，于是两类真实存在的写法被漏掉：
+ *   · 协议相对地址 `//evil.com/x`
+ *   · token.json 的 `$$$` 分隔格式里裸写的域名（`...$$$api.example.com$$$...`）
+ * 漏掉的结果是 thirdPartyDomains 为空 → 被判成 B 类 safe，凭证注入的风险分级
+ * 形同虚设（fail-open）。这里改成「抓所有像域名的 token」，再排掉文件名与内网地址。
+ */
 function extractDomains(text: string): string[] {
-  const urlRegex = /https?:\/\/([^/\s$]+)/g;
+  const re = /(?:(?:https?|rtmp|rtsp):)?(?:\/\/)?((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,24})(?::\d{1,5})?/gi;
   const domains: string[] = [];
   let match;
-  while ((match = urlRegex.exec(text)) !== null) {
-    const host = match[1].split(':')[0]; // 去掉端口
-    if (host && !host.includes('localhost') && !host.startsWith('127.') && !host.startsWith('192.168.')) {
-      domains.push(host);
-    }
+  while ((match = re.exec(text)) !== null) {
+    const host = match[1].toLowerCase();
+    const tld = host.split('.').pop() || '';
+    if (FILE_LIKE_TLDS.has(tld)) continue;      // token.json 之类
+    if (!host.includes('.')) continue;
+    if (host === 'localhost' || host.endsWith('.local')) continue;
+    if (host.startsWith('127.') || host.startsWith('192.168.') || host.startsWith('10.')) continue;
+    domains.push(host);
   }
   return [...new Set(domains)];
 }

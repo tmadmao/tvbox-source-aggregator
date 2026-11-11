@@ -21,6 +21,43 @@ export async function siteFingerprint(site: TVBoxSite): Promise<string> {
   return Array.from(arr.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+/**
+ * 指纹的业务主键：聚合流程中途会换对象（注入、改名都返回新对象），
+ * 只能靠 key + api 把「同一个站点」认回来。
+ */
+export function siteFpKey(site: TVBoxSite): string {
+  return `${site.key}\u0000${site.api}`;
+}
+
+/**
+ * 一次性算出整批站点的指纹。
+ *
+ * 必须在**凭证注入之前**调用：注入会改写 ext（token.json 地址、cookie 字段），
+ * 而 ext 参与指纹，于是黑名单（注入前算）与跳过名单（注入后算）永不相交，
+ * 且凭证一刷新（重新扫码/cookie 过期重取）跳过名单里的几百条全部失配。
+ * 统一在注入前算一次、全链路复用同一份值，两边的时序才一致。
+ */
+export async function computeFingerprints(sites: TVBoxSite[]): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  for (const site of sites) {
+    try {
+      map.set(siteFpKey(site), await siteFingerprint(site));
+    } catch {
+      /* 个别失败不影响整批 */
+    }
+  }
+  return map;
+}
+
+/** 优先取注入前算好的指纹；没有（例如单站点操作）再即时计算 */
+export async function siteFingerprintCached(
+  site: TVBoxSite,
+  cache?: Map<string, string> | null,
+): Promise<string> {
+  const hit = cache?.get(siteFpKey(site));
+  return hit ?? siteFingerprint(site);
+}
+
 export async function loadBlacklist(storage: Storage): Promise<Blacklist> {
   try {
     const raw = await storage.get(KV_BLACKLIST);

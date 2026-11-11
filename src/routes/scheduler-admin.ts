@@ -5,6 +5,7 @@
 
 import type { Hono } from 'hono';
 import type { Storage } from '../storage/interface';
+import { verifyAdmin } from '../core/admin-auth';
 import type { AppConfig } from '../core/types';
 import { loadRunHistory, summarizeRuns, pruneRuns } from '../core/run-history';
 import { loadAlertConfig, saveAlertConfig, sendAlert, normalizeAlertConfig } from '../core/alerts';
@@ -12,12 +13,6 @@ import {
   KV_LIVE_QUALITY_GAP, KV_LIVE_QUALITY_GUARANTEE, KV_RUN_HISTORY,
   KV_LIVE_GUARD_ENABLED, KV_LIVE_GUARD_REPORT, KV_LIVE_GUARD_STATE,
 } from '../core/config';
-
-function verifyAdmin(request: Request, config: AppConfig): boolean {
-  const token = config.adminToken;
-  if (!token) return false;
-  return request.headers.get('Authorization') === `Bearer ${token}`;
-}
 
 export interface SchedulerRouteDeps {
   storage: Storage;

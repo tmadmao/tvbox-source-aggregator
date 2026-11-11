@@ -1413,7 +1413,7 @@ async function loadSources() {
           <div class="source-url">\${esc(s.url)}</div>
         </div>
         <div class="source-actions">
-          <button class="btn btn-sm btn-danger" onclick="removeSource('\${esc(s.url)}')">\${t('remove')}</button>
+          <button class="btn btn-sm btn-danger" data-url="\${esc(s.url)}" onclick="removeSource(this.dataset.url)">\${t('remove')}</button>
         </div>
       </div>\`;
     }).join('');
@@ -1501,8 +1501,8 @@ async function loadMacCMS() {
           <div class="source-url">\${esc(s.api)}</div>
         </div>
         <div class="source-actions" style="display:flex;gap:6px">
-          <button class="btn btn-sm" onclick="validateMC('\${esc(s.api)}')">\${t('test')}</button>
-          <button class="btn btn-sm btn-danger" onclick="removeMC('\${esc(s.key)}')">\${t('remove')}</button>
+          <button class="btn btn-sm" data-api="\${esc(s.api)}" onclick="validateMC(this.dataset.api)">\${t('test')}</button>
+          <button class="btn btn-sm btn-danger" data-key="\${esc(s.key)}" onclick="removeMC(this.dataset.key)">\${t('remove')}</button>
         </div>
       </div>
     \`).join('');
@@ -1614,7 +1614,7 @@ async function loadLives() {
           <div class="source-url">\${esc(s.url)}</div>
         </div>
         <div class="source-actions">
-          <button class="btn btn-sm btn-danger" onclick="removeLive('\${esc(s.url)}')">\${t('remove')}</button>
+          <button class="btn btn-sm btn-danger" data-url="\${esc(s.url)}" onclick="removeLive(this.dataset.url)">\${t('remove')}</button>
         </div>
       </div>
     \`).join('');

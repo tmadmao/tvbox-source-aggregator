@@ -5,6 +5,7 @@
 
 import type { Hono } from 'hono';
 import type { Storage } from '../storage/interface';
+import { verifyAdmin } from '../core/admin-auth';
 import type { AppConfig, ChannelSpeedMap, TVBoxLiveGroup } from '../core/types';
 import {
   KV_MERGED_CONFIG,
@@ -17,12 +18,6 @@ import { addDeadUrls } from '../core/live-deadlist';
 import { loadOverrides, saveOverrides, setOverride, overrideOf, isProtectedUrl } from '../core/channel-curation';
 import { bareUrl } from '../core/live-url';
 import { trimGroupsToTopN } from '../core/live-url';
-
-function verifyAdmin(request: Request, config: AppConfig): boolean {
-  const token = config.adminToken;
-  if (!token) return false;
-  return request.headers.get('Authorization') === `Bearer ${token}`;
-}
 
 async function loadLives(storage: Storage): Promise<TVBoxLiveGroup[]> {
   const raw = await storage.get(KV_MERGED_CONFIG);

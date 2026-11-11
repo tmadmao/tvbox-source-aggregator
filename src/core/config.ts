@@ -52,6 +52,14 @@ export const KV_EDGE_PROXIES = 'edge_proxies';
 export const KV_CLOUD_CREDENTIALS = 'cloud_credentials';
 export const KV_CREDENTIAL_POLICY = 'credential_policy';
 export const KV_CREDENTIAL_ENCRYPTION_KEY = 'credential_encryption_key';
+/**
+ * 自托管 token.json 的路径密钥（32 位十六进制）。
+ *
+ * 为什么需要：TVBox/FongMi 客户端只能裸 GET 这个地址（带不了 Bearer），
+ * 所以不能用 token 鉴权；但路径公开 + 明文吐网盘 Cookie 等于凭证外泄。
+ * 折中：用不可猜的路径段代替凭证，聚合注入时自动写进源的 ext。
+ */
+export const KV_CREDENTIAL_TOKEN_SECRET = 'credential_token_secret';
 
 // 搜索配额
 export const KV_SEARCH_QUOTA = 'search_quota';
@@ -68,15 +76,17 @@ export const KV_LIVE_GROUP_MERGE = 'live_group_merge';     // 直播分组归并
 export const KV_SITE_KEEP_LINK = 'site_keep_link';         // 不可达剔除时是否保留链接（true=仅跳过探测）
 export const KV_SITE_SKIP_LIST = 'site_skip_list';         // 保留模式下被跳过的站点指纹
 export const KV_LIVE_SHOPPING_FILTER = 'live_shopping_filter'; // 购物台过滤（开关 + 关键词）
-export const KV_CHANNEL_PROBE_INLINE = 'channel_probe_inline';
+export const KV_CHANNEL_PROBE_INLINE = 'channel_probe_inline'; // 频道测速是否并入聚合流程（默认是）
+export const KV_CHANNEL_PROBE_SEGMENT = 'channel_probe_segment'; // L2 分片复验开关（默认开）
 export const KV_LIVE_HEAD_VERIFY = 'live_head_verify'; // 输出前复核首位源（默认开）
 export const KV_CHANNEL_REGISTRY = 'live_channel_registry'; // 频道目录（固化框架）
-export const KV_LIVE_TOP_N = 'live_top_n';                   // 每频道保留源数（一键选优） // 频道测速是否并入聚合流程
+export const KV_LIVE_TOP_N = 'live_top_n';                   // 每频道保留源数（一键选优）
 export const KV_LIVE_CHANNEL_OVERRIDES = 'live_channel_overrides'; // 频道置顶/禁用（人工覆盖）
 export const KV_LIVE_HOST_STATE = 'live_host_state';           // 域名健康台账（可疑/判死）
 export const KV_LIVE_HIDE_DEAD = 'live_hide_dead';             // 全死频道是否直接隐藏（默认开）
 export const KV_LIVE_USE_CONFIG_LIVES = 'live_use_config_lives'; // 是否采用配置源自带的 lives（默认否）
-export const KV_FTP_SYNC = 'ftp_sync';                       // FTP 对外发布配置           // 手动「清理死源」后持久化的黑名单（源恢复后自动移出）
+export const KV_FTP_SYNC = 'ftp_sync';                       // FTP 对外发布配置
+export const KV_SITE_FP = 'site_fingerprints';               // 站点指纹（凭证注入前计算，全链路复用）
 
 // 聚合日志
 export const KV_AGG_LOGS = 'agg_logs';
@@ -90,8 +100,16 @@ export const RUN_HISTORY_KEEP_MS = 7 * 24 * 3600 * 1000;
 export const RUN_HISTORY_MAX = 400;
 export const KV_ALERT_CONFIG = 'alert_config';
 export const KV_ALERT_LAST = 'alert_last';
-/** 超过这个时间没有成功聚合 → 判定「漏跑」 */
-export const RUN_STALE_MS = 26 * 3600 * 1000;
+/**
+ * 超过这个时间没有成功聚合 → 判定「漏跑」。
+ *
+ * 25 小时（而不是 26）：默认每天 05:00 聚合、06:30 自检，若当天没跑，
+ * 06:30 时距上次成功 25.5 小时 —— 取 26 会差 30 分钟判不出来，要等第二天，
+ * 等于「单日漏跑静默」。25 小时让当天的自检就能响。
+ */
+export const RUN_STALE_MS = 25 * 3600 * 1000;
+/** 漏跑自检频率：每 6 小时一次（判据再看 25 小时，最迟漏跑当天的下一个自检点就能发现） */
+export const MISSED_RUN_CHECK_CRON = '0 */6 * * *';
 
 // ═══ 分级源质量保障 ═══════════════════════════════════
 export const KV_LIVE_CURATION_RULES = 'live_curation_rules';   // 编排规则外置（台序/配额）
@@ -160,6 +178,14 @@ export const CHANNEL_PROBE_SEGMENT_MIN_BYTES = 32768; // 低于 32KB 视为无�
 export const CHANNEL_PROBE_SEGMENT_MIN_KBPS = 200;
 // 缓存过期（6 小时）：过期即重测，保证排序不会基于一周前的数据
 export const CHANNEL_SPEED_TTL_MS = 6 * 60 * 60 * 1000; // 成功源的常规回测间隔
+/**
+ * 测速缓存的物理保留期（7 天）。
+ *
+ * TTL 6 小时只是「该重测了」，条目仍要留着供台账回测周期（待观察 7 天）参考；
+ * 超过 7 天的条目对任何判据都没用了，落盘时裁掉 —— 否则 channel_speed_map
+ * 只增不减（历史 URL 全留），单 key 体积会一直涨。
+ */
+export const CHANNEL_SPEED_MAP_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
 /** 确认死链的回测间隔：撞一次要等满超时，没必要和好源一样勤 */
 export const CHANNEL_DEAD_RECHECK_MS = 24 * 60 * 60 * 1000;
 /**
@@ -174,4 +200,16 @@ export const CHANNEL_PROBE_RULE_VERSION = 4;
 export const CHANNEL_DEAD_FAILS = 2;
 /** 域名去相关：一个频道的前 N 条源尽量来自不同 host（同 host 只出现一次） */
 export const CHANNEL_HOST_DIVERSIFY = 3;
+
+/**
+ * 「快 / 慢」的唯一阈值来源。
+ *
+ * 以前排序分（source-health 的 speedScore 归零点 3000ms）和分级（gradeOf 的
+ * 2500/4500ms）各有一套边界：3000ms 的源在排序里速度分为 0，在分级里却算「可用」。
+ * 守夜挑头部源用排序、最终输出用分级，两边标准不一致。这里收口成一份。
+ */
+/** 「快」的硬线：客户端 5 秒超时，留一半余量，超过 2.5 秒开播就有风险 */
+export const QUALITY_FAST_MS = 2500;
+/** 「能看」的硬线：超过 4.5 秒基本必撞客户端超时 */
+export const QUALITY_SLOW_MS = 4500;
 
