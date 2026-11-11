@@ -219,8 +219,10 @@ export async function runQualityGuarantee(
         requireSegment,
         now,
       });
-      // 无论有没有缺口，都先应用「去掉死链 + 前排域名去相关」的结果
-      ch.urls = before.urls;
+      // 无论有没有缺口，都先应用「去掉死链 + 前排域名去相关」的结果；
+      // 但如果一条可播的都没有，保留原池子 —— 否则缺口报表会变成「源池 0 条」，
+      // 看不出这个台到底是「本来就没源」还是「有源但全死」。
+      ch.urls = before.urls.length > 0 ? before.urls : poolUrls;
       tasks.push({
         group,
         channelIndex: idx,
@@ -295,7 +297,7 @@ export async function runQualityGuarantee(
       requireSegment,
       now: Date.now(),
     });
-    ch.urls = after.urls;
+    ch.urls = after.urls.length > 0 ? after.urls : task.poolUrls;
     task.after = after;
   }
 

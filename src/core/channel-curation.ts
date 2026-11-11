@@ -467,7 +467,9 @@ function canonicalize(
       cap: C.rules.focusSources,
       requireSegment,
     });
-    return { name: v.name, urls: arranged.urls };
+    // 全死台保留原池子：它们随后会被「隐藏全死频道」移出输出，
+    // 但缺口报表需要知道「有几条候选」，不能变成 0。
+    return { name: v.name, urls: arranged.urls.length > 0 ? arranged.urls : v.urls };
   });
 }
 
