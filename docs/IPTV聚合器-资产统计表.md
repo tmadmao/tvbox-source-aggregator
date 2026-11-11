@@ -44,9 +44,10 @@
 | `core/run-history.ts` | 223 | 调度执行记录（触发/状态/耗时/产出）、7 天裁剪、悬空 running 收尾、逐日汇总 |
 | `core/alerts.ts` | 226 | 失败/超时/漏跑告警（Webhook / Telegram）、6 小时去重、通知文案 |
 | `core/quality-guard.ts` | 480 | 源质量守夜：每小时重验重点台头部源、补缺口、从直播源清单发现新地址、只升不降地发布 |
+| `core/channel-conflicts.ts` | 111 | 跨频道重复源裁决：票数归属，CCTV5/CCTV5+ 平票归 + 变体 |
 | `routes/scheduler-admin.ts` | 99 | 执行历史、告警配置与测试、质量缺口报表、质量保障开关 |
 | `routes/curation-admin.ts` | 63 | 编排规则读取/保存/恢复默认 |
-| `test/*.test.ts` + `scripts/test.js` | 801 | 55 个单测（tier / curation / ledger / host-health / run-history），esbuild + node:test，无新依赖 |
+| `test/*.test.ts` + `scripts/test.js` | 1003 | 62 个单测（tier / curation / ledger / host-health / run-history），esbuild + node:test，无新依赖 |
 
 `channel-curation.ts` 从 518 → 875 行：台序/配额/付费与海外排除名单全部 KV 驱动，合并后接质量编排。
 
