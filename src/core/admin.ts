@@ -3633,11 +3633,11 @@ function fillCurationRules(r) {
   $('ruleOverseasGroups').value = (r.overseasGroups || []).join('\\n');
   $('ruleOverseasKeywords').value = (r.overseasKeywords || []).join('\\n');
   $('ruleKeep').value = (r.keepChannels || []).join('\\n');
-  $('ruleFocusSources').value = r.focusSources || 8;
+  $('ruleFocusSources').value = r.focusSources || 20;
   var q = r.quotas || {};
-  $('quotaCctv').value = q.cctv == null ? 6 : q.cctv;
-  $('quotaSatellite').value = q.satellite == null ? 5 : q.satellite;
-  $('quotaLocal').value = q.local == null ? 2 : q.local;
+  $('quotaCctv').value = q.cctv == null ? 8 : q.cctv;
+  $('quotaSatellite').value = q.satellite == null ? 6 : q.satellite;
+  $('quotaLocal').value = q.local == null ? 3 : q.local;
 }
 
 function readLines(id) {
@@ -3650,7 +3650,7 @@ async function saveCurationRules() {
     satOrder: readLines('ruleSat'),
     nanjingOrder: readLines('ruleNj'),
     provinceOrder: readLines('ruleProvince'),
-    focusSources: Number($('ruleFocusSources').value) || 8,
+    focusSources: Number($('ruleFocusSources').value) || 20,
     quotas: {
       cctv: Number($('quotaCctv').value) || 0,
       satellite: Number($('quotaSatellite').value) || 0,

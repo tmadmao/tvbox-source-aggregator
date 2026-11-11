@@ -12,6 +12,7 @@ import {
   canonicalChannelName,
   DEFAULT_CURATION_RULES,
 } from '../src/core/channel-curation';
+import { QUALITY_MAX_SOURCES } from '../src/core/channel-tier';
 import type { ChannelSpeedEntry, ChannelSpeedMap, TVBoxLiveGroup } from '../src/core/types';
 
 function okEntry(speedMs = 800): ChannelSpeedEntry {
@@ -30,8 +31,8 @@ function okEntry(speedMs = 800): ChannelSpeedEntry {
 test('normalizeRules：空输入回落到默认值', () => {
   const r = normalizeRules(null);
   assert.deepEqual(r.cctvOrder, DEFAULT_CURATION_RULES.cctvOrder);
-  assert.equal(r.focusSources, 8);
-  assert.equal(r.quotas.cctv, 6);
+  assert.equal(r.focusSources, 20);
+  assert.equal(r.quotas.cctv, 8);
 });
 
 test('normalizeRules：去重、去空、裁剪越界值', () => {
@@ -41,10 +42,18 @@ test('normalizeRules：去重、去空、裁剪越界值', () => {
     quotas: { cctv: 99, satellite: -3, local: 2 },
   });
   assert.deepEqual(r.satOrder, ['江苏卫视', '湖南卫视']);
-  assert.equal(r.focusSources, 20);
-  assert.equal(r.quotas.cctv, 20);        // 先夹到 20，再不超过 focusSources
+  assert.equal(r.focusSources, QUALITY_MAX_SOURCES);   // 99 被夹到 20
+  assert.equal(r.quotas.cctv, QUALITY_MAX_SOURCES);    // 先夹到 20，再不超过 focusSources
   assert.equal(r.quotas.satellite, 0);
   assert.equal(r.quotas.local, 2);
+});
+
+test('normalizeRules：配额不得超过 focusSources', () => {
+  const r = normalizeRules({ focusSources: 5, quotas: { cctv: 20, satellite: 12, local: 4 } });
+  assert.equal(r.focusSources, 5);
+  assert.equal(r.quotas.cctv, 5);
+  assert.equal(r.quotas.satellite, 5);
+  assert.equal(r.quotas.local, 4);
 });
 
 test('tierOfChannel：分组优先，名字兜底纠错分组', () => {

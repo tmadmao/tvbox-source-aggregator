@@ -24,7 +24,7 @@ import { loadFtpConfig, uploadLiveTxt } from './core/ftp-sync';
 import { loadSkipList, addSkipList } from './core/site-skip';
 import { bareUrl } from './core/live-url';
 import { loadSpeedMap as loadChannelSpeedMap, saveSpeedMap, runChannelProbe, isProbeEnabled } from './core/channel-probe';
-import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_CHANNEL_MERGED_TREE, KV_AGG_LOGS, AGG_LOGS_MAX, KV_SITE_SNAPSHOT, KV_SITE_KEEP_LINK, KV_CHANNEL_PROBE_INLINE, KV_CHANNEL_PROBE_SEGMENT, KV_LIVE_HEAD_VERIFY, KV_LIVE_TOP_N, KV_LIVE_USE_CONFIG_LIVES, KV_LIVE_HIDE_DEAD, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, BASE_URL_PLACEHOLDER, KV_SITE_HEALTH_MAP, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SITE_FP, KV_SOURCE_MAP, KV_LIVE_QUALITY_GUARANTEE, KV_LIVE_QUALITY_GAP, QUALITY_GUARANTEE_BUDGET_MS } from './core/config';
+import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_CHANNEL_MERGED_TREE, KV_AGG_LOGS, AGG_LOGS_MAX, KV_SITE_SNAPSHOT, KV_SITE_KEEP_LINK, KV_CHANNEL_PROBE_INLINE, KV_CHANNEL_PROBE_SEGMENT, KV_LIVE_HEAD_VERIFY, KV_LIVE_TOP_N, KV_LIVE_USE_CONFIG_LIVES, KV_LIVE_HIDE_DEAD, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, BASE_URL_PLACEHOLDER, KV_SITE_HEALTH_MAP, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SITE_FP, KV_SOURCE_MAP, KV_LIVE_QUALITY_GUARANTEE, KV_LIVE_QUALITY_GAP, QUALITY_GUARANTEE_BUDGET_MS, LIVE_SOURCE_TIMEOUT_MS } from './core/config';
 import { loadBlacklist, applyBlacklist, pruneBlacklist, saveBlacklist, computeFingerprints, siteFingerprintCached } from './core/blacklist';
 import { transformSiteNames } from './core/cleaner';
 import { parseConfigJson, type FetchProxyConfig } from './core/fetcher';
@@ -523,10 +523,12 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
       const shopping = await loadShoppingFilter(storage);
 
       let mergeResult;
+      // 用直播源专用超时：.m3u 列表常有几百 KB，沿用 config 的 5 秒会把它们整批判死
+      const liveTimeoutMs = LIVE_SOURCE_TIMEOUT_MS;
       if (liveMergeMode === 'separated') {
-        mergeResult = await separatedMergeLives(uniqueInputs, config.fetchTimeoutMs, channelSpeedMap);
+        mergeResult = await separatedMergeLives(uniqueInputs, liveTimeoutMs, channelSpeedMap);
       } else {
-        mergeResult = await mergeLivesToNative(uniqueInputs, config.fetchTimeoutMs, channelSpeedMap, { groupMerge, shopping });
+        mergeResult = await mergeLivesToNative(uniqueInputs, liveTimeoutMs, channelSpeedMap, { groupMerge, shopping });
       }
 
       // 下载/解析整体失败时不要把直播树清空——沿用上次结果，避免电视端直播源突然变空

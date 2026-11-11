@@ -18,6 +18,33 @@ export const KV_LIVE_SCRAPED = 'live_scraped';
 // 直播源代理缓存 TTL（秒）
 export const LIVE_PROXY_TTL = 7200; // 2 小时
 
+/**
+ * GitHub raw 镜像前缀（按顺序尝试，先成功的胜出）。
+ *
+ * 为什么需要：很多直播源订阅挂在 raw.githubusercontent.com 上，而 NAS / 家宽
+ * 直连该域名的 443 端口是被阻断的（DNS 能解析出 185.199.x.x，TCP 直接不通，
+ * curl 返回 000）。实测 NAS 上 10 条 GitHub 源全部下载失败 —— 配置里明明有，
+ * 结果一条都没生效，聚合日志里也只是一行 "sourcesFailed"。
+ *
+ * 镜像只做「原样代理」，内容与原始地址一致；空数组表示不启用镜像回退。
+ */
+export const LIVE_MIRROR_PREFIXES = [
+  'https://gh-proxy.com/',
+  'https://ghproxy.net/',
+];
+
+/** 只对这些 host 的地址尝试镜像回退（避免给正常源平白多试一轮） */
+export const LIVE_MIRROR_HOSTS = ['raw.githubusercontent.com', 'gist.githubusercontent.com'];
+
+/**
+ * 直播源列表文件（m3u/txt）的下载超时。
+ *
+ * 不能复用 FETCH_TIMEOUT_MS（5 秒）：那个值是为「配置 JSON」定的，通常几十 KB；
+ * 直播源列表动辄 200KB~1.3MB（实测 suxuang/myIPTV 268KB 冷启动要 18.6 秒，
+ * cs3306 的合集 845KB 要 10 秒）。5 秒会把这类大文件整体判死。
+ */
+export const LIVE_SOURCE_TIMEOUT_MS = 20000;
+
 // 图片代理缓存 TTL（秒）
 export const IMG_PROXY_TTL = 604800; // 7 天
 

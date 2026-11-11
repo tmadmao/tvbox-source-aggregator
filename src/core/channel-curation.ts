@@ -20,6 +20,7 @@ import {
   arrangeSources,
   DEFAULT_TIER_QUOTA,
   TIER_ORDER,
+  QUALITY_MAX_SOURCES,
   type ChannelTier,
   type TierQuotaMap,
 } from './channel-tier';
@@ -137,7 +138,14 @@ export const DEFAULT_CURATION_RULES: CurationRules = {
   satOrder: SAT_ORDER,
   nanjingOrder: NANJING_ORDER,
   provinceOrder: PROVINCE_ORDER,
-  focusSources: 8,
+  /**
+   * 重点频道每台最多保留几条源。
+   *
+   * 8 → 20：用户 2026-11-11 晚要求「每个频道最大可用源数量从 8 提到 20」，
+   * 目的是提高可用性 —— 电视端按顺序试源，前几条挂了还能往下走。
+   * 上限常量 QUALITY_MAX_SOURCES 在 channel-tier 里，两者要一起动。
+   */
+  focusSources: 20,
   quotas: { ...DEFAULT_TIER_QUOTA },
   excludePaid: true,
   excludeOverseas: true,
@@ -307,12 +315,14 @@ export function normalizeRules(input: unknown): CurationRules {
   base.keepChannels = pickList(o.keepChannels, base.keepChannels);
 
   const fs = Number(o.focusSources);
-  base.focusSources = Number.isFinite(fs) ? Math.max(1, Math.min(20, Math.floor(fs))) : base.focusSources;
+  base.focusSources = Number.isFinite(fs)
+    ? Math.max(1, Math.min(QUALITY_MAX_SOURCES, Math.floor(fs)))
+    : base.focusSources;
 
   const q = (o.quotas && typeof o.quotas === 'object' ? o.quotas : {}) as Partial<TierQuotaMap>;
   for (const t of TIER_ORDER) {
     const n = Number(q[t]);
-    base.quotas[t] = Number.isFinite(n) ? Math.max(0, Math.min(20, Math.floor(n))) : base.quotas[t];
+    base.quotas[t] = Number.isFinite(n) ? Math.max(0, Math.min(QUALITY_MAX_SOURCES, Math.floor(n))) : base.quotas[t];
   }
   // 配额不能超过输出上限，否则永远不可能达标
   for (const t of TIER_ORDER) base.quotas[t] = Math.min(base.quotas[t], base.focusSources);

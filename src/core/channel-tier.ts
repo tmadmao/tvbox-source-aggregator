@@ -20,6 +20,15 @@ export type ChannelTier = 'cctv' | 'satellite' | 'local' | 'other';
 
 export const TIER_ORDER: ChannelTier[] = ['cctv', 'satellite', 'local', 'other'];
 
+/**
+ * 每台源数的硬上限。
+ *
+ * 用户 2026-11-11 要求「每个频道的最大可用源数量 8 → 20」。
+ * 这个值不做成纯 KV：KV 是「用户当前想保留几条」，这里是「代码允许的物理上限」，
+ * 否则后台一次手滑填个 500，单台就会塞进 500 条源，电视端翻页都翻不完。
+ */
+export const QUALITY_MAX_SOURCES = 20;
+
 export const TIER_LABEL: Record<ChannelTier, string> = {
   cctv: '央视',
   satellite: '卫视',
@@ -36,19 +45,28 @@ export const TIER_LABEL: Record<ChannelTier, string> = {
  *   · 卫视次之（5 条）；
  *   · 地方台数量太大、单台源本来就少，保 3 条即可，重点地方台另外加测；
  *   · 其他分组不承诺，保 2 条只用于排序。
+ *
+ * 2026-11-11 输出上限 8 → 20 时**没有**把配额等比翻倍，实测数据不支持这么做：
+ * NAS 上 14037 条源里只有 500 条可播（3.56%），平均每台 0.18 条。
+ * 配额是「必须凑够几条能播的」，翻倍只会把 8 分钟的补测预算烧在注定凑不满的台上，
+ * 后半个频道树连被测的机会都没有。所以配额只小幅上调一档。
+ *
+ * 「最多 20 条」由 cap（curateRules.focusSources）负责，与这里无关：
+ * 上限放开的收益来自 cap —— 多出来的位置给「未测过/偏慢」的源，
+ * 而 arrangeSources 已经剔除所有确认死链，所以放宽 cap 不会把死链塞给客户端。
  */
 export const DEFAULT_TIER_QUOTA: Record<ChannelTier, number> = {
-  cctv: 6,
-  satellite: 5,
-  local: 2,
-  other: 2,
+  cctv: 8,
+  satellite: 6,
+  local: 3,
+  other: 3,
 };
 
 /** 深挖候选上限：前排不够时，允许从一个台的完整源池里再翻这么多条出来实测 */
 export const TIER_CANDIDATE_LIMIT: Record<ChannelTier, number> = {
-  cctv: 18,
-  satellite: 14,
-  local: 8,
+  cctv: 24,
+  satellite: 18,
+  local: 10,
   other: 0,
 };
 

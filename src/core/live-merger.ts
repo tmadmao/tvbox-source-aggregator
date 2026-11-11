@@ -6,7 +6,7 @@ import type {
   TVBoxLiveChannel,
   ChannelSpeedMap,
 } from './types';
-import { TVBOX_UA, BROWSER_UA, CHANNEL_HOST_DIVERSIFY } from './config';
+import { TVBOX_UA, BROWSER_UA, CHANNEL_HOST_DIVERSIFY, LIVE_MIRROR_PREFIXES, LIVE_MIRROR_HOSTS } from './config';
 import { splitUrlSource, bareUrl, joinUrlSource, compareBySpeed, diversifyByHost } from './live-url';
 import { normalizeGroupName, groupPriority, type LiveGroupMergeConfig } from './live-groups';
 import { isShoppingChannel, type ShoppingFilterConfig } from './live-filters';
@@ -254,23 +254,59 @@ export function parseLiveContent(content: string, source: string, sourceSpeedMs?
 
 // ─── 下载 m3u/txt ──────────────────────────────────────
 
+/**
+ * 该地址是否需要走镜像回退。
+ *
+ * 只对 GitHub raw 生效：正常源（guovin / hacks.tools / gitee）直连好好的，
+ * 给它套一层镜像只会增加一次失败的超时等待。
+ */
+export function mirrorCandidates(url: string): string[] {
+  if (LIVE_MIRROR_PREFIXES.length === 0) return [];
+  let host = '';
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return [];
+  }
+  if (!LIVE_MIRROR_HOSTS.some((h) => host === h)) return [];
+  return LIVE_MIRROR_PREFIXES.map((p) => `${p}${url}`);
+}
+
+async function fetchOnce(url: string, ua: string, header: Record<string, string> | undefined, timeoutMs: number): Promise<string | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, {
+      signal: controller.signal,
+      headers: { 'User-Agent': ua, ...(header || {}) },
+    });
+    clearTimeout(timer);
+    if (resp.ok) {
+      const text = await resp.text();
+      if (text && text.length > 20) return text;
+    }
+  } catch {
+    clearTimeout(timer);
+  }
+  return null;
+}
+
 async function downloadLive(input: LiveSourceInput, timeoutMs: number): Promise<string | null> {
   const uas = [input.ua || TVBOX_UA, BROWSER_UA];
+  // 直连优先：镜像本身也可能挂，能直连就没必要绕
   for (const ua of uas) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const resp = await fetch(input.url, {
-        signal: controller.signal,
-        headers: { 'User-Agent': ua, ...(input.header || {}) },
-      });
-      clearTimeout(timer);
-      if (resp.ok) {
-        const text = await resp.text();
-        if (text && text.length > 20) return text;
+    const text = await fetchOnce(input.url, ua, input.header, timeoutMs);
+    if (text) return text;
+  }
+  // 直连失败再走镜像（GitHub raw 在 NAS/家宽上普遍 443 不通）
+  const mirrors = mirrorCandidates(input.url);
+  for (const m of mirrors) {
+    for (const ua of uas) {
+      const text = await fetchOnce(m, ua, input.header, timeoutMs);
+      if (text) {
+        console.log(`[live-merger] ${input.name || input.url} fetched via mirror ${new URL(m).host}`);
+        return text;
       }
-    } catch {
-      clearTimeout(timer);
     }
   }
   return null;
