@@ -106,8 +106,8 @@ export const KV_LIVE_GUARD_REPORT = 'live_guard_report';     // 最近一次守�
 export const KV_LIVE_GUARD_STATE = 'live_guard_state';       // 连续缺口计数（用于告警）
 /** 守夜间隔：每小时一次（只看将过期/有缺口的台，成本很低） */
 export const LIVE_GUARD_CRON = '20 * * * *';
-/** 头部源复核新鲜度：超过 3 小时就重新验一次 */
-export const GUARD_STALE_MS = 3 * 3600 * 1000;
+/** 头部源复核新鲜度：超过 1 小时就重新验一次（每小时守夜正好全覆盖） */
+export const GUARD_STALE_MS = 60 * 60 * 1000;
 export const GUARD_BUDGET_MS = 8 * 60 * 1000;
 export const GUARD_CONCURRENCY = 6;
 /** 连续多少轮仍有缺口才告警（避免一次抖动就叫人） */

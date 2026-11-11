@@ -366,10 +366,13 @@ export async function runQualityGuard(storage: Storage, opts: GuardOptions = {})
         quota: task.quota, cap: rules.focusSources, requireSegment, now: Date.now(),
       });
       if (arr.urls.length === 0) continue;
+      // 不把「还没测出结论」的新地址直接发出去：它们对客户端就是一次未知的超时。
+      // 已在原输出里的条目保留，避免把原有候选越改越少。
+      const safeUrls = arr.urls.filter((u) => map[bareUrl(u)] || task.outputUrls.includes(u));
       const before = JSON.stringify(task.outputUrls);
-      const after = JSON.stringify(arr.urls);
+      const after = JSON.stringify(safeUrls);
       if (after !== before) {
-        task.group.channels[task.index].urls = arr.urls;
+        task.group.channels[task.index].urls = safeUrls;
         changed++;
       }
       if (task.afterVerified > task.beforeVerified) repaired++;
@@ -409,7 +412,13 @@ export async function runQualityGuard(storage: Storage, opts: GuardOptions = {})
     for (const k of Object.keys(state)) if (!gapKeys.has(k)) delete state[k];
     await storage.put(KV_LIVE_GUARD_STATE, JSON.stringify(state));
 
-    const persistent = gaps.filter((g) => (state[`${g.tier}|${g.name}`] || 0) >= GUARD_ALERT_AFTER);
+    // 只对「快黑的重点台」告警：央视/卫视且可播 ≤1。地方台 1/2 属于覆盖问题，
+    // 留在缺口报表里，不半夜叫人。
+    const persistent = gaps.filter((g) =>
+      (g.tier === 'cctv' || g.tier === 'satellite')
+      && g.afterVerified <= 1
+      && (state[`${g.tier}|${g.name}`] || 0) >= GUARD_ALERT_AFTER,
+    );
     if (persistent.length > 0) {
       const cfg = await loadAlertConfig(storage);
       await sendAlert(storage, cfg, {
