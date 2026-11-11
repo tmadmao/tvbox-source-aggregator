@@ -83,6 +83,24 @@ export const KV_AGG_LOGS = 'agg_logs';
 export const AGG_LOGS_MAX = 50;
 export const KV_SITE_SNAPSHOT = 'site_snapshot';
 
+// ═══ 调度执行历史与告警 ═══════════════════════════════
+export const KV_RUN_HISTORY = 'run_history';
+/** 保留 7 天（按条数再兜一层，避免异常刷屏把 KV 撑爆） */
+export const RUN_HISTORY_KEEP_MS = 7 * 24 * 3600 * 1000;
+export const RUN_HISTORY_MAX = 400;
+export const KV_ALERT_CONFIG = 'alert_config';
+export const KV_ALERT_LAST = 'alert_last';
+/** 超过这个时间没有成功聚合 → 判定「漏跑」 */
+export const RUN_STALE_MS = 26 * 3600 * 1000;
+
+// ═══ 分级源质量保障 ═══════════════════════════════════
+export const KV_LIVE_CURATION_RULES = 'live_curation_rules';   // 编排规则外置（台序/配额）
+export const KV_LIVE_QUALITY_GUARANTEE = 'live_quality_guarantee'; // 质量保障总开关（默认开）
+export const KV_LIVE_QUALITY_GAP = 'live_quality_gap';         // 最近一次缺口报表
+/** 缺口补测整轮预算：央视→卫视→重点地方台，超时收工不拖垮聚合 */
+export const QUALITY_GUARANTEE_BUDGET_MS = 8 * 60 * 1000;
+
+
 // 背景设置
 export const KV_BG_SETTINGS = 'bg_settings';
 

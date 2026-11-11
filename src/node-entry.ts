@@ -21,6 +21,10 @@ import {
 } from './core/config';
 import type { Storage } from './storage/interface';
 import type { AppConfig } from './core/types';
+import { beginRun, finishRun, loadRunHistory, summarizeRuns, type RunStatus, type RunTrigger } from './core/run-history';
+import { loadAlertConfig, notifyRunFinished, notifyMissedRun } from './core/alerts';
+import { KV_MERGED_CONFIG } from './core/config';
+import { APP_VERSION, APP_COMMIT } from './core/version';
 
 // 加载 .env（嵌入式/无文件系统环境下容错：nodejs-mobile 无 .env，依赖注入的环境变量）
 try {
@@ -118,12 +122,38 @@ async function main() {
   let refreshRunning = false;
   const AGGREGATION_TIMEOUT_MS = 45 * 60 * 1000; // 聚合整体超时 45 分钟（含内联频道测速）
 
-  const runWithGuard = async () => {
+  /** 聚合完成后从产出里取几个数字写进执行记录，后台一眼能看出「跑了但产出异常」 */
+  const readRunStats = async (): Promise<Record<string, number>> => {
+    try {
+      const raw = await storage.get(KV_MERGED_CONFIG);
+      if (!raw) return {};
+      const full = JSON.parse(raw) as { lives?: Array<{ channels?: Array<{ urls?: string[] }> }> };
+      const lives = Array.isArray(full.lives) ? full.lives : [];
+      let channels = 0;
+      let urls = 0;
+      for (const g of lives) {
+        for (const ch of g.channels || []) {
+          channels++;
+          urls += (ch.urls || []).length;
+        }
+      }
+      return { groups: lives.length, channels, urls };
+    } catch {
+      return {};
+    }
+  };
+
+  const runWithGuard = async (trigger: RunTrigger = 'manual') => {
     if (refreshRunning) {
       console.log('[aggregation] Already running, skipping');
+      const rec = await beginRun(storage, 'aggregate', trigger, '上一轮仍在运行');
+      await finishRun(storage, rec.id, { status: 'skipped', error: '上一轮仍在运行' });
       return;
     }
     refreshRunning = true;
+    const rec = await beginRun(storage, 'aggregate', trigger);
+    let status: RunStatus = 'success';
+    let error: string | undefined;
     try {
       await Promise.race([
         runAggregation(storage, config),
@@ -133,9 +163,38 @@ async function main() {
       ]);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      status = /timed out/i.test(msg) ? 'timeout' : 'failed';
+      error = msg;
       console.error(`[aggregation] Error: ${msg}`);
     } finally {
       refreshRunning = false;
+      const stats = await readRunStats();
+      const finished = await finishRun(storage, rec.id, { status, error, stats });
+      if (finished) {
+        const summary = summarizeRuns(await loadRunHistory(storage));
+        const alertCfg = await loadAlertConfig(storage);
+        const delivery = await notifyRunFinished(storage, alertCfg, finished, summary);
+        if (delivery.sent) console.log(`[alert] run ${finished.status} notified`);
+        else if (delivery.skipped && delivery.skipped !== 'not-needed') {
+          console.log(`[alert] run ${finished.status} not sent (${delivery.skipped})`);
+        }
+      }
+    }
+  };
+
+  /** 漏跑自检：启动 30 秒后一次，之后每天 06:30 一次 */
+  const checkMissedRun = async () => {
+    try {
+      const summary = summarizeRuns(await loadRunHistory(storage));
+      if (!summary.stale) return;
+      const cfg = await loadAlertConfig(storage);
+      const delivery = await notifyMissedRun(storage, cfg, summary);
+      console.warn(
+        `[scheduler] 超过 26 小时没有成功聚合（上次成功：${summary.lastSuccess?.startedAt || '无'}）` +
+        (delivery.sent ? '，已告警' : ''),
+      );
+    } catch (err) {
+      console.warn(`[scheduler] missed-run check failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -150,7 +209,7 @@ async function main() {
     currentSchedule = cronExpr;
     currentTask = cron.schedule(cronExpr, () => {
       console.log(`[cron] Triggered at ${new Date().toISOString()}`);
-      runWithGuard();
+      runWithGuard('cron');
     });
     console.log(`[cron] Scheduled: ${cronExpr}`);
   }
@@ -197,19 +256,38 @@ async function main() {
 
   // 频道测速独立 cron（每 12 小时，默认关闭）
   cron.schedule(CHANNEL_PROBE_CRON, async () => {
+    const rec = await beginRun(storage, 'probe', 'probe', '独立测速 cron');
     try {
-      if (!(await isProbeEnabled(storage))) return;
+      if (!(await isProbeEnabled(storage))) {
+        await finishRun(storage, rec.id, { status: 'skipped', note: '测速开关关闭' });
+        return;
+      }
       // 测速已并入聚合流程时，这条独立 cron 不再重复跑
-      if ((await storage.get('channel_probe_inline')) !== 'false') return;
+      if ((await storage.get('channel_probe_inline')) !== 'false') {
+        await finishRun(storage, rec.id, { status: 'skipped', note: '测速已并入聚合' });
+        return;
+      }
       console.log(`[channel-probe-cron] Triggered at ${new Date().toISOString()}`);
-      await runChannelProbe(storage);
+      const r = await runChannelProbe(storage);
+      await finishRun(storage, rec.id, {
+        status: r.state === 'error' ? 'failed' : 'success',
+        error: r.error,
+        stats: { probed: r.probed, success: r.success, failed: r.failed, coverage: r.coverage },
+      });
       // 测速完成后重建一次，否则新排序要等到下一次聚合才生效
-      await runWithGuard();
+      await runWithGuard('probe');
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await finishRun(storage, rec.id, { status: 'failed', error: msg });
       console.error('[channel-probe-cron] Error:', err);
     }
   });
   console.log(`[channel-probe-cron] Scheduled: ${CHANNEL_PROBE_CRON} (runs when enabled)`);
+
+  // 漏跑自检：每天 06:30（北京时间）检查「昨天 5 点跑没跑」，启动后再补一次
+  cron.schedule('30 6 * * *', () => { void checkMissedRun(); });
+  setTimeout(() => { void checkMissedRun(); }, 30_000);
+  console.log('[scheduler] Missed-run check: 30 6 * * *, plus 30s after startup');
 
   const app = createApp({
     storage,
@@ -234,6 +312,7 @@ async function main() {
   serve({ fetch: app.fetch, port }, (info) => {
     console.log('');
     console.log('  TVBox Source Aggregator');
+    console.log(`  > Build:   v${APP_VERSION} (${APP_COMMIT})`);
     console.log(`  > Local:   http://localhost:${info.port}/`);
     if (displayHost !== 'localhost') {
       console.log(`  > Network: http://${displayHost}:${info.port}/`);

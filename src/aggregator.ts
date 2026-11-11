@@ -14,7 +14,8 @@ import { reverifyHeadSources } from './core/live-verify';
 import { withProbeNet } from './core/probe-net';
 import { trimGroupsToTopN } from './core/live-url';
 import { loadChannelOrder, applyChannelOrder } from './core/live-order';
-import { loadOverrides, curateGroups, isFocusChannel } from './core/channel-curation';
+import { loadOverrides, curateGroups, isFocusChannel, loadCurationRules } from './core/channel-curation';
+import { runQualityGuarantee } from './core/source-guarantee';
 import { loadRegistry, saveRegistry, upsertFromGroups } from './core/channel-registry';
 import { loadLiveGroupMerge } from './core/live-groups';
 import { loadShoppingFilter } from './core/live-filters';
@@ -22,7 +23,7 @@ import { loadFtpConfig, uploadLiveTxt } from './core/ftp-sync';
 import { loadSkipList, addSkipList } from './core/site-skip';
 import { bareUrl } from './core/live-url';
 import { loadSpeedMap as loadChannelSpeedMap, saveSpeedMap, runChannelProbe, isProbeEnabled } from './core/channel-probe';
-import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_CHANNEL_MERGED_TREE, KV_AGG_LOGS, AGG_LOGS_MAX, KV_SITE_SNAPSHOT, KV_SITE_KEEP_LINK, KV_CHANNEL_PROBE_INLINE, KV_LIVE_HEAD_VERIFY, KV_LIVE_TOP_N, KV_LIVE_USE_CONFIG_LIVES, KV_LIVE_HIDE_DEAD, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, BASE_URL_PLACEHOLDER, KV_SITE_HEALTH_MAP, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SOURCE_MAP } from './core/config';
+import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_CHANNEL_MERGED_TREE, KV_AGG_LOGS, AGG_LOGS_MAX, KV_SITE_SNAPSHOT, KV_SITE_KEEP_LINK, KV_CHANNEL_PROBE_INLINE, KV_LIVE_HEAD_VERIFY, KV_LIVE_TOP_N, KV_LIVE_USE_CONFIG_LIVES, KV_LIVE_HIDE_DEAD, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, BASE_URL_PLACEHOLDER, KV_SITE_HEALTH_MAP, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SOURCE_MAP, KV_LIVE_QUALITY_GUARANTEE, KV_LIVE_QUALITY_GAP, QUALITY_GUARANTEE_BUDGET_MS } from './core/config';
 import { loadBlacklist, applyBlacklist, pruneBlacklist, saveBlacklist, siteFingerprint } from './core/blacklist';
 import { transformSiteNames } from './core/cleaner';
 import { parseConfigJson, type FetchProxyConfig } from './core/fetcher';
@@ -534,6 +535,11 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   }
   }
 
+  // 编排规则外置到 KV：台序、每台保留条数、各档保底可播条数都在这里。
+  // 读一次，后面的黑名单豁免、质量保障、编排共用同一份，避免三处各自读盘。
+  const curationRules = await loadCurationRules(storage);
+  const requireSegment = (await storage.get('channel_probe_segment')) !== 'false';
+
   // Step 6.6: 死源黑名单过滤（管理后台「清理死源」按钮写入）
   // 只过滤输出，不影响测速：测速仍按完整频道树跑，源恢复后会自动移出黑名单
   if (Array.isArray(merged.lives) && merged.lives.length > 0) {
@@ -574,7 +580,7 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
         for (const ch of group.channels) {
           // 重点频道（央视/卫视/南京）不吃黑名单：它们的源少，命中一次就整台消失，
           // 而用户打开电视找的就是这几个台。死链仍会排到末尾。
-          if (isFocusChannel(ch.name)) {
+          if (isFocusChannel(ch.name, curationRules)) {
             channels.push(ch);
             exemptChannels++;
             continue;
@@ -592,6 +598,39 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
         deadList: deadUrls.length, droppedUrls, droppedChannels, exemptChannels, leftGroups: keptGroups.length,
       });
     }
+  }
+
+  // Step 6.6c: 分级源质量保障（央视 → 卫视 → 重点地方台）
+  // 「保量」从「每台 8 条源」改成「每台 N 条**本轮实测能播、延迟低于客户端超时、不同域名**的源」。
+  // 缺口从完整源池里继续补测（很多台输出 8 条、池子里还有几十条），
+  // 补不到的记缺口报表，不再靠给 78% 的单源小台盲目塞源。
+  if ((await storage.get(KV_LIVE_QUALITY_GUARANTEE)) !== 'false'
+    && Array.isArray(merged.lives) && merged.lives.length > 0) {
+    const qMap = await loadChannelSpeedMap(storage);
+    const result = await withProbeNet(() => runQualityGuarantee(
+      merged.lives as unknown as TVBoxLiveGroup[],
+      qMap,
+      { rules: curationRules, requireSegment, budgetMs: QUALITY_GUARANTEE_BUDGET_MS },
+    ));
+    await saveSpeedMap(storage, qMap);
+    await storage.put(KV_LIVE_QUALITY_GAP, JSON.stringify({
+      at: new Date().toISOString(),
+      stats: result.stats,
+      coverage: result.coverage,
+      gaps: result.gaps.slice(0, 120),
+    }));
+    logger.infoFields('aggregation', 'quality-guarantee', {
+      channels: result.stats.channels,
+      probed: result.stats.probed,
+      fixed: result.stats.fixed,
+      gapBefore: result.stats.gapBefore,
+      gapAfter: result.stats.gapAfter,
+      ms: result.stats.elapsedMs,
+      exhausted: result.stats.budgetExhausted,
+      cctvMet: `${result.stats.byTier.find((x) => x.tier === 'cctv')?.metAfter ?? 0}/${result.stats.byTier.find((x) => x.tier === 'cctv')?.channels ?? 0}`,
+      satMet: `${result.stats.byTier.find((x) => x.tier === 'satellite')?.metAfter ?? 0}/${result.stats.byTier.find((x) => x.tier === 'satellite')?.channels ?? 0}`,
+      localMet: `${result.stats.byTier.find((x) => x.tier === 'local')?.metAfter ?? 0}/${result.stats.byTier.find((x) => x.tier === 'local')?.channels ?? 0}`,
+    });
   }
 
   // Step 6.6a: 一键选优（每频道保留 topN 条源）
@@ -639,7 +678,10 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   if (Array.isArray(merged.lives) && merged.lives.length > 0) {
     const overrides = await loadOverrides(storage);
     const curateSpeedMap = await loadChannelSpeedMap(storage);
-    const curated = curateGroups(merged.lives as never, overrides, curateSpeedMap);
+    const curated = curateGroups(merged.lives as never, overrides, curateSpeedMap, {
+      rules: curationRules,
+      requireSegment,
+    });
     merged.lives = curated.groups as never;
     logger.infoFields('aggregation', 'channel-curated', {
       mergedDupes: curated.mergedDupes, disabled: curated.disabled, rescued: curated.rescued,

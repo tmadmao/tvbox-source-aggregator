@@ -23,6 +23,7 @@ import {
   TVBOX_UA,
 } from './config';
 import { extractAllUrls } from './live-merger';
+import { buildUrlTierMap, TIER_RANK } from './channel-curation';
 import { netFetch } from './probe-net';
 import { recordProbe } from './source-health';
 import {
@@ -507,6 +508,15 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
 
   const urls = extractAllUrls(groups);
   const totalChannels = groups.reduce((n, g) => n + g.channels.length, 0);
+  /**
+   * 测速优先级：央视 → 卫视 → 地方台 → 其他。
+   *
+   * 以前待测队列只按「上次测速时间」排，预算紧的时候（单轮 20 分钟）可能整轮都
+   * 没轮到央视，输出用的就是半天前的旧结论。用户看的就是央视和卫视，
+   * 这两档的结论必须是本轮的。
+   */
+  const tierMap = buildUrlTierMap(groups);
+  const tierRankOf = (u: string): number => TIER_RANK.get(tierMap.get(u) ?? 'other') ?? 9;
 
   if (urls.length === 0) {
     const status: ChannelProbeStatus = {
@@ -598,12 +608,15 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
 
     // 待测队列：规则升级的排最前（它们决定排序是否可信），其余按上次测速时间由旧到新
     const staleUrls = urls.filter(isStale).sort((a, b) => {
+      const ta = tierRankOf(a);
+      const tb = tierRankOf(b);
+      if (ta !== tb) return ta - tb;
       const oa = isOutdated(a) ? 0 : 1;
       const ob = isOutdated(b) ? 0 : 1;
       if (oa !== ob) return oa - ob;
-      const ta = cached[a] ? Date.parse(cached[a].probedAt) || 0 : 0;
-      const tb = cached[b] ? Date.parse(cached[b].probedAt) || 0 : 0;
-      return ta - tb;
+      const ma = cached[a] ? Date.parse(cached[a].probedAt) || 0 : 0;
+      const mb = cached[b] ? Date.parse(cached[b].probedAt) || 0 : 0;
+      return ma - mb;
     });
 
     /**
@@ -626,18 +639,27 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
       for (const [h, list] of byHost) {
         const quota = hostSampleQuota(hostMap.get(h), nowMs);
         if (quota < 0) { toProbe.push(...list); continue; }
-        if (quota === 0) continue;                 // 未到复验时间：整域跳过
+        if (quota === 0) {
+          // 域名还没到复验时间：普通源整域跳过，但重点频道（央视/卫视/地方台）
+          // 不吃这一刀 —— 它们正是「打开电视就看」的那几十个台，结论过期比浪费请求更糟。
+          const focus = list.filter((u) => tierRankOf(u) <= 2);
+          if (focus.length > 0) toProbe.push(...focus);
+          continue;
+        }
         const picked = sampleHostUrls(list, quota);
         if (picked.length < list.length) sampledHosts.add(h);
         toProbe.push(...picked);
       }
       toProbe.sort((a, b) => {
+        const ta = tierRankOf(a);
+        const tb = tierRankOf(b);
+        if (ta !== tb) return ta - tb;
         const oa = isOutdated(a) ? 0 : 1;
         const ob = isOutdated(b) ? 0 : 1;
         if (oa !== ob) return oa - ob;
-        const ta = cached[a] ? Date.parse(cached[a].probedAt) || 0 : 0;
-        const tb = cached[b] ? Date.parse(cached[b].probedAt) || 0 : 0;
-        return ta - tb;
+        const ma = cached[a] ? Date.parse(cached[a].probedAt) || 0 : 0;
+        const mb = cached[b] ? Date.parse(cached[b].probedAt) || 0 : 0;
+        return ma - mb;
       });
     }
     const freshCount = urls.length - toProbe.length;

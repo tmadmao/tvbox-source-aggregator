@@ -154,6 +154,9 @@ export function applyHostOutcomes(
 
   for (const o of outcomes) {
     if (o.probed === 0) continue;
+    // 只测了 1 条就全失败的不下结论 —— 单条地址坏了不代表整个域名死了。
+    // 调用方也会先过滤，这里再兜一层，避免以后新增调用点漏掉这个前提。
+    if (o.ok === 0 && o.probed < HOST_MIN_URLS) continue;
     const cur = rows.get(o.host);
     if (o.ok > 0) {
       if (cur) { rows.delete(o.host); revived++; }

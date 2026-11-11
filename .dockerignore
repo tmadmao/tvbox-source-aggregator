@@ -7,3 +7,10 @@ data
 .git
 .gitignore
 README.md
+# 开发脚本里有 NAS 明文密码（dev/askpass.sh），绝不能进构建上下文
+dev
+test
+.test-dist
+docs
+android
+live.txt

@@ -28,6 +28,8 @@ import { mountChannelProbeRoutes } from './routes/channel-probe-admin';
 import { mountChannelOrderRoutes } from './routes/channel-order-admin';
 import { mountChannelRoutes } from './routes/channels-admin';
 import { mountHealthRoutes } from './routes/health-admin';
+import { mountSchedulerRoutes } from './routes/scheduler-admin';
+import { mountCurationRoutes } from './routes/curation-admin';
 import { loadSkipList, clearSkipList } from './core/site-skip';
 import { loadFtpConfig, saveFtpConfig, testFtpConnection, uploadLiveTxt, type FtpSyncConfig } from './core/ftp-sync';
 
@@ -1959,6 +1961,8 @@ export function createApp(deps: AppDeps): Hono {
     mountChannelOrderRoutes(app, { storage, config, triggerRefresh: deps.triggerRefresh });
     mountChannelRoutes(app, { storage, config, triggerRefresh: deps.triggerRefresh });
     mountHealthRoutes(app, { storage, config });
+    mountSchedulerRoutes(app, { storage, config });
+    mountCurationRoutes(app, { storage, config, triggerRefresh: deps.triggerRefresh });
   }
 
   // Builder 路由（仅 Node/Docker 启用，动态 import 避免 CF bundle 引入 fs/path）

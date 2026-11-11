@@ -6,8 +6,13 @@ const path = require('path');
 const fs = require('fs');
 
 const pkg = require(path.join(__dirname, '..', 'package.json'));
-let commit = 'unknown';
-try { commit = execSync('git rev-parse --short HEAD', { encoding: 'utf-8' }).trim(); } catch {}
+// 镜像里没有 .git（也不该为了版本号把 .git 塞进镜像），所以优先用构建参数；
+// 本地构建没有参数时再退回 git。
+let commit = process.env.APP_COMMIT || 'unknown';
+if (!process.env.APP_COMMIT) {
+  try { commit = execSync('git rev-parse --short HEAD', { encoding: 'utf-8' }).trim(); } catch {}
+}
+const version = process.env.APP_VERSION || pkg.version;
 
 build({
   entryPoints: [path.join(__dirname, '..', 'src', 'node-entry.ts')],
@@ -19,7 +24,7 @@ build({
   external: ['better-sqlite3'],
   sourcemap: true,
   define: {
-    '__APP_VERSION__': JSON.stringify(pkg.version),
+    '__APP_VERSION__': JSON.stringify(version),
     '__APP_COMMIT__': JSON.stringify(commit),
   },
 }).then(() => {

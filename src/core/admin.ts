@@ -506,6 +506,59 @@ ${sharedStyles}
         </div>
       </div>
     </div>
+    <!-- Quality guarantee -->
+    <div class="section" id="qualitySection">
+      <div class="section-title">源质量保障（央视 → 卫视 → 重点地方台）</div>
+      <div style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:8px">
+        「保量」不再是每台 8 条，而是每台 N 条<b>本轮实测能播、延迟低于 5 秒超时、不同域名</b>的源。
+        死链不再占位置；前排不够时从完整源池继续补测，补不到的进下面的缺口表。
+      </div>
+      <div id="qualitySummary" style="display:flex;gap:18px;flex-wrap:wrap;font-size:0.82rem;margin-bottom:8px"></div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:0.82rem;margin-bottom:8px">
+        <input type="checkbox" id="qualityEnabled" onchange="saveQualityToggle()">
+        <span>启用输出前补测（关闭后只按上一轮测速结果排序）</span>
+        <span class="status-text" id="qualityStatus" style="font-family:var(--mono);font-size:0.75rem"></span>
+      </label>
+      <div id="qualityGaps" style="max-height:300px;overflow:auto"></div>
+    </div>
+
+    <!-- Curation rules -->
+    <div class="section" id="curationRulesSection">
+      <div class="section-title">编排规则（改顺序不用发版）</div>
+      <div style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:8px">
+        一行一个台名，顺序即电视上的顺序。保存后<b>下一次聚合</b>生效；重启不丢。
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div>
+          <div style="font-size:0.78rem;margin-bottom:4px">央视台序</div>
+          <textarea id="ruleCctv" class="import-textarea" style="min-height:130px;font-size:0.72rem"></textarea>
+        </div>
+        <div>
+          <div style="font-size:0.78rem;margin-bottom:4px">卫视台序</div>
+          <textarea id="ruleSat" class="import-textarea" style="min-height:130px;font-size:0.72rem"></textarea>
+        </div>
+        <div>
+          <div style="font-size:0.78rem;margin-bottom:4px">南京 / 重点地方台置顶</div>
+          <textarea id="ruleNj" class="import-textarea" style="min-height:100px;font-size:0.72rem"></textarea>
+        </div>
+        <div>
+          <div style="font-size:0.78rem;margin-bottom:4px">省份先后</div>
+          <textarea id="ruleProvince" class="import-textarea" style="min-height:100px;font-size:0.72rem"></textarea>
+        </div>
+      </div>
+      <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px;font-size:0.8rem">
+        <label>每台保留 <input id="ruleFocusSources" type="number" min="1" max="20" style="width:56px;padding:3px 5px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary)"> 条</label>
+        <label>央视保底 <input id="quotaCctv" type="number" min="0" max="20" style="width:52px;padding:3px 5px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary)"></label>
+        <label>卫视保底 <input id="quotaSatellite" type="number" min="0" max="20" style="width:52px;padding:3px 5px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary)"></label>
+        <label>地方台保底 <input id="quotaLocal" type="number" min="0" max="20" style="width:52px;padding:3px 5px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary)"></label>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+        <button class="btn btn-sm btn-primary" onclick="saveCurationRules()">保存规则</button>
+        <button class="btn btn-sm" onclick="resetCurationRules()">恢复默认</button>
+        <span class="status-text" id="curationStatus" style="font-family:var(--mono);font-size:0.75rem"></span>
+      </div>
+    </div>
+
     <!-- Channel Order -->
     <div class="section" id="channelOrderSection">
       <div class="section-title" data-i18n="channelOrderTitle">频道排序</div>
@@ -852,6 +905,44 @@ ${sharedStyles}
   <!-- Agg Logs Tab -->
   <div class="tab-panel" id="panelAggLogs">
     <div class="section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div class="section-title" style="margin:0">调度执行历史（最近 7 天）</div>
+        <button class="btn btn-sm" onclick="loadRunHistory()">刷新</button>
+      </div>
+      <div id="runSummary" style="display:flex;gap:18px;flex-wrap:wrap;font-size:0.82rem;margin-bottom:10px"></div>
+      <div id="runDaily" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;font-size:0.7rem"></div>
+      <div id="runTable" style="max-height:320px;overflow:auto"></div>
+      <div style="margin-top:6px;font-size:0.72rem;color:var(--text-dim)">
+        进程被杀/断电导致的悬空执行，会在下次启动后自动收尾为「进程中断」。
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">失败告警</div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:0.82rem;margin-bottom:10px">
+        <input type="checkbox" id="alertEnabled">
+        <span>启用告警（聚合失败 / 超时 / 超过 26 小时没成功时主动推送）</span>
+      </label>
+      <div class="add-form">
+        <input type="url" id="alertWebhook" placeholder="Webhook URL（POST JSON，可接企业微信/飞书机器人）">
+        <input class="name-input" type="text" id="alertTgToken" placeholder="Telegram Bot Token（可选）">
+        <input class="name-input" type="text" id="alertTgChat" placeholder="Telegram Chat ID（可选）">
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:0.82rem;margin-top:8px">
+        <input type="checkbox" id="alertOnSuccess">
+        <span>成功也通知（默认只在异常时提醒）</span>
+      </label>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+        <button class="btn btn-sm btn-primary" onclick="saveAlertConfig()">保存</button>
+        <button class="btn btn-sm" onclick="testAlert()">发送测试</button>
+        <span class="status-text" id="alertStatus" style="font-family:var(--mono);font-size:0.75rem"></span>
+      </div>
+      <div style="margin-top:6px;font-size:0.72rem;color:var(--text-dim)">
+        同一类告警 6 小时内只发一次；未配置通道时只在后台标红，不会静默。
+      </div>
+    </div>
+
+    <div class="section">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
         <div class="section-title" style="margin:0" data-i18n="aggLogsTitle">Aggregation Logs</div>
         <button class="btn btn-sm" onclick="clearAggLogs()" data-i18n="clearLogs">Clear All</button>
@@ -1195,8 +1286,9 @@ function switchTab(tab) {
   });
   // 排序面板数据依赖登录态，切到直播页时重新拉一次，避免登录前初始化时 401 后一直是空
   if (tab === 'live') loadChannelOrder();
-  if (tab === 'channels') { loadChannelOrder(); loadChannels(); }
+  if (tab === 'channels') { loadChannelOrder(); loadChannels(); loadQuality(); loadCurationRules(); }
   if (tab === 'health') loadHealth();
+  if (tab === 'aggLogs') { loadRunHistory(); loadAlertConfig(); }
 }
 
 // --- Source health ---
@@ -1232,6 +1324,10 @@ async function loadAll() {
   loadGroupOrder();
   loadBgSettings();
   loadAggLogs();
+  loadRunHistory();
+  loadAlertConfig();
+  loadQuality();
+  loadCurationRules();
 }
 
 async function loadStatus() {
@@ -3235,6 +3331,275 @@ async function clearAggLogs() {
   if (!confirm('Clear all aggregation logs?')) return;
   await auth.authFetch('/admin/agg-logs', { method: 'DELETE' });
   loadAggLogs();
+}
+
+// ─── 调度执行历史 ──────────────────────────────────────
+var RUN_STATUS_LABEL = { success: '成功', failed: '失败', timeout: '超时', running: '运行中', skipped: '跳过' };
+var RUN_TRIGGER_LABEL = { cron: '定时', manual: '手动', startup: '启动', probe: '测速' };
+
+function runColor(s) {
+  if (s === 'success') return 'var(--green)';
+  if (s === 'running') return 'var(--amber, #BA7517)';
+  if (s === 'skipped') return 'var(--text-dim)';
+  return 'var(--red)';
+}
+
+function fmtDuration(ms) {
+  if (!ms || ms < 0) return '-';
+  if (ms < 60000) return Math.round(ms / 1000) + 's';
+  return Math.floor(ms / 60000) + 'm' + Math.round((ms % 60000) / 1000) + 's';
+}
+
+function fmtLocal(iso) {
+  if (!iso) return '-';
+  var d = new Date(iso);
+  return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+async function loadRunHistory() {
+  try {
+    var res = await auth.authFetch('/admin/run-history?limit=40');
+    var data = await res.json();
+    renderRunSummary(data.summary);
+    renderRunDaily(data.summary.daily || []);
+    var runs = data.runs || [];
+    if (runs.length === 0) {
+      $('runTable').innerHTML = '<div style="color:var(--text-dim);font-size:0.82rem">还没有执行记录（下次聚合开始后出现）。</div>';
+      return;
+    }
+    var html = '<table style="width:100%;border-collapse:collapse;font-size:0.78rem">';
+    html += '<tr style="text-align:left;color:var(--text-dim);border-bottom:1px solid var(--border)">';
+    html += '<th style="padding:6px">开始</th><th>类型</th><th>触发</th><th>状态</th><th>耗时</th><th>产出 / 说明</th></tr>';
+    runs.forEach(function(r) {
+      var detail = '';
+      if (r.stats && r.stats.channels != null) {
+        detail = r.stats.channels + ' 频道 / ' + r.stats.urls + ' 源';
+      }
+      if (r.error) detail += (detail ? ' · ' : '') + esc(r.error);
+      if (!detail && r.note) detail = esc(r.note);
+      html += '<tr style="border-bottom:1px solid var(--border)">';
+      html += '<td style="padding:6px;font-family:var(--mono)">' + fmtLocal(r.startedAt) + '</td>';
+      html += '<td>' + (r.kind === 'aggregate' ? '聚合' : r.kind === 'probe' ? '测速' : '备份') + '</td>';
+      html += '<td>' + (RUN_TRIGGER_LABEL[r.trigger] || r.trigger) + '</td>';
+      html += '<td style="color:' + runColor(r.status) + ';font-weight:600">' + (RUN_STATUS_LABEL[r.status] || r.status) + '</td>';
+      html += '<td style="font-family:var(--mono)">' + fmtDuration(r.durationMs) + '</td>';
+      html += '<td style="color:var(--text-dim)">' + detail + '</td>';
+      html += '</tr>';
+    });
+    html += '</table>';
+    $('runTable').innerHTML = html;
+  } catch (e) {
+    $('runTable').innerHTML = '<div style="color:var(--red);font-size:0.8rem">读取执行历史失败</div>';
+  }
+}
+
+function renderRunSummary(s) {
+  if (!s) { $('runSummary').innerHTML = ''; return; }
+  var ok = s.lastSuccess ? fmtLocal(s.lastSuccess.startedAt) : '无';
+  var color = s.stale ? 'var(--red)' : 'var(--green)';
+  var html = '';
+  html += '<span>最近成功：<b style="color:' + color + '">' + ok + '</b></span>';
+  html += '<span>连续失败：<b style="color:' + (s.consecutiveFailures > 0 ? 'var(--red)' : 'var(--text-secondary)') + '">' + s.consecutiveFailures + '</b></span>';
+  html += '<span>今天：' + s.today.success + ' 成功 / ' + s.today.failed + ' 失败' + (s.today.running ? ' / ' + s.today.running + ' 运行中' : '') + '</span>';
+  if (s.stale) {
+    html += '<span style="color:var(--red);font-weight:600">⚠ 已 ' + (s.staleHours >= 0 ? s.staleHours + ' 小时' : '很久') + '没有成功聚合</span>';
+  } else {
+    html += '<span style="color:var(--green)">调度正常</span>';
+  }
+  $('runSummary').innerHTML = html;
+}
+
+function renderRunDaily(daily) {
+  if (!daily || daily.length === 0) { $('runDaily').innerHTML = ''; return; }
+  var html = '';
+  daily.forEach(function(d) {
+    var label = d.date.slice(5);
+    var mark = d.status === 'success' ? '✓' : d.status === 'failed' ? '✕' : d.status === 'partial' ? '…' : '·';
+    var color = d.status === 'success' ? 'var(--green)' : d.status === 'failed' ? 'var(--red)' : 'var(--text-dim)';
+    var bg = d.status === 'success' ? 'rgba(29,158,117,0.12)' : d.status === 'failed' ? 'rgba(220,50,47,0.12)' : 'var(--surface-2)';
+    html += '<span style="padding:3px 8px;border-radius:6px;background:' + bg + ';color:' + color + ';font-family:var(--mono)">'
+      + label + ' ' + mark + (d.at ? ' ' + d.at : '') + '</span>';
+  });
+  $('runDaily').innerHTML = html;
+}
+
+// ─── 告警配置 ──────────────────────────────────────────
+async function loadAlertConfig() {
+  try {
+    var res = await auth.authFetch('/admin/alert-config');
+    var cfg = await res.json();
+    $('alertEnabled').checked = !!cfg.enabled;
+    $('alertWebhook').value = cfg.webhookUrl || '';
+    $('alertTgToken').value = cfg.telegramToken || '';
+    $('alertTgChat').value = cfg.telegramChatId || '';
+    $('alertOnSuccess').checked = !!cfg.onSuccess;
+  } catch (e) {}
+}
+
+async function saveAlertConfig() {
+  var body = {
+    enabled: $('alertEnabled').checked,
+    webhookUrl: $('alertWebhook').value.trim(),
+    telegramToken: $('alertTgToken').value.trim(),
+    telegramChatId: $('alertTgChat').value.trim(),
+    onSuccess: $('alertOnSuccess').checked
+  };
+  try {
+    var res = await auth.authFetch('/admin/alert-config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    var d = await res.json();
+    $('alertStatus').textContent = d.success ? '已保存' : '保存失败';
+    $('alertStatus').style.color = d.success ? 'var(--green)' : 'var(--red)';
+    setTimeout(function() { $('alertStatus').textContent = ''; }, 2500);
+  } catch (e) {
+    $('alertStatus').textContent = '保存失败';
+  }
+}
+
+async function testAlert() {
+  $('alertStatus').textContent = '发送中…';
+  try {
+    var res = await auth.authFetch('/admin/alert-config/test', { method: 'POST' });
+    var d = await res.json();
+    if (d.success) {
+      $('alertStatus').textContent = '已发送';
+      $('alertStatus').style.color = 'var(--green)';
+    } else {
+      var why = d.delivery && d.delivery.skipped ? d.delivery.skipped : (d.delivery ? (d.delivery.webhook || d.delivery.telegram || '失败') : '失败');
+      $('alertStatus').textContent = '未发送：' + why;
+      $('alertStatus').style.color = 'var(--red)';
+    }
+  } catch (e) {
+    $('alertStatus').textContent = '发送失败';
+    $('alertStatus').style.color = 'var(--red)';
+  }
+}
+
+// ─── 源质量保障 ────────────────────────────────────────
+var TIER_NAME = { cctv: '央视', satellite: '卫视', local: '地方台', other: '其他' };
+
+async function loadQuality() {
+  try {
+    var res = await auth.authFetch('/admin/quality-gap');
+    var d = await res.json();
+    $('qualityEnabled').checked = d.enabled !== false;
+    var report = d.report;
+    if (!report) {
+      $('qualitySummary').innerHTML = '<span style="color:var(--text-dim)">还没有质量报告（跑一次聚合后生成）。</span>';
+      $('qualityGaps').innerHTML = '';
+      return;
+    }
+    var st = report.stats || {};
+    var cov = report.coverage || [];
+    var html = '';
+    cov.forEach(function(c) {
+      if (!c.channels) return;
+      var color = c.met === c.channels ? 'var(--green)' : (c.met >= c.channels * 0.7 ? 'var(--amber, #BA7517)' : 'var(--red)');
+      html += '<span>' + (TIER_NAME[c.tier] || c.tier) + '：<b style="color:' + color + '">' + c.met + '/' + c.channels + '</b> 达标</span>';
+    });
+    html += '<span>补测：<b>' + (st.probed || 0) + '</b> 条</span>';
+    html += '<span>缺口：<b style="color:' + ((st.gapAfter || 0) > 0 ? 'var(--red)' : 'var(--green)') + '">' + (st.gapAfter || 0) + '</b> 条</span>';
+    html += '<span style="color:var(--text-dim)">' + (report.at ? fmtLocal(report.at) + ' 生成' : '') + '</span>';
+    $('qualitySummary').innerHTML = html;
+
+    var gaps = report.gaps || [];
+    if (gaps.length === 0) {
+      $('qualityGaps').innerHTML = '<div style="color:var(--green);font-size:0.8rem">所有重点频道都达到保底条数。</div>';
+      return;
+    }
+    var t = '<table style="width:100%;border-collapse:collapse;font-size:0.78rem">';
+    t += '<tr style="text-align:left;color:var(--text-dim);border-bottom:1px solid var(--border)"><th style="padding:6px">档位</th><th>频道</th><th>可播/保底</th><th>源池</th><th>不同域名</th></tr>';
+    gaps.forEach(function(g) {
+      t += '<tr style="border-bottom:1px solid var(--border)">';
+      t += '<td style="padding:6px">' + (TIER_NAME[g.tier] || g.tier) + '</td>';
+      t += '<td>' + esc(g.name) + '</td>';
+      t += '<td style="color:' + (g.verified === 0 ? 'var(--red)' : 'var(--amber, #BA7517)') + ';font-weight:600">' + g.verified + '/' + g.quota + '</td>';
+      t += '<td>' + g.pool + '</td>';
+      t += '<td>' + g.hosts + '</td>';
+      t += '</tr>';
+    });
+    t += '</table>';
+    $('qualityGaps').innerHTML = t;
+  } catch (e) {}
+}
+
+async function saveQualityToggle() {
+  var enabled = $('qualityEnabled').checked;
+  try {
+    await auth.authFetch('/admin/quality-guarantee', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: enabled }) });
+    $('qualityStatus').textContent = enabled ? '已开启，下次聚合生效' : '已关闭';
+    setTimeout(function() { $('qualityStatus').textContent = ''; }, 2500);
+  } catch (e) {
+    $('qualityStatus').textContent = '保存失败';
+  }
+}
+
+// ─── 编排规则 ──────────────────────────────────────────
+async function loadCurationRules() {
+  try {
+    var res = await auth.authFetch('/admin/curation-rules');
+    var d = await res.json();
+    fillCurationRules(d.rules);
+  } catch (e) {}
+}
+
+function fillCurationRules(r) {
+  if (!r) return;
+  $('ruleCctv').value = (r.cctvOrder || []).join('\\n');
+  $('ruleSat').value = (r.satOrder || []).join('\\n');
+  $('ruleNj').value = (r.nanjingOrder || []).join('\\n');
+  $('ruleProvince').value = (r.provinceOrder || []).join('\\n');
+  $('ruleFocusSources').value = r.focusSources || 8;
+  var q = r.quotas || {};
+  $('quotaCctv').value = q.cctv == null ? 6 : q.cctv;
+  $('quotaSatellite').value = q.satellite == null ? 5 : q.satellite;
+  $('quotaLocal').value = q.local == null ? 3 : q.local;
+}
+
+function readLines(id) {
+  return $(id).value.split('\\n').map(function(x) { return x.trim(); }).filter(Boolean);
+}
+
+async function saveCurationRules() {
+  var body = {
+    cctvOrder: readLines('ruleCctv'),
+    satOrder: readLines('ruleSat'),
+    nanjingOrder: readLines('ruleNj'),
+    provinceOrder: readLines('ruleProvince'),
+    focusSources: Number($('ruleFocusSources').value) || 8,
+    quotas: {
+      cctv: Number($('quotaCctv').value) || 0,
+      satellite: Number($('quotaSatellite').value) || 0,
+      local: Number($('quotaLocal').value) || 0
+    }
+  };
+  try {
+    var res = await auth.authFetch('/admin/curation-rules', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    var d = await res.json();
+    if (d.success) {
+      fillCurationRules(d.rules);
+      $('curationStatus').textContent = '已保存，下次聚合生效';
+      $('curationStatus').style.color = 'var(--green)';
+    } else {
+      $('curationStatus').textContent = '保存失败';
+      $('curationStatus').style.color = 'var(--red)';
+    }
+    setTimeout(function() { $('curationStatus').textContent = ''; }, 3500);
+  } catch (e) {
+    $('curationStatus').textContent = '保存失败';
+    $('curationStatus').style.color = 'var(--red)';
+  }
+}
+
+async function resetCurationRules() {
+  if (!confirm('恢复默认编排规则？')) return;
+  try {
+    var res = await auth.authFetch('/admin/curation-rules', { method: 'DELETE' });
+    var d = await res.json();
+    fillCurationRules(d.rules);
+    $('curationStatus').textContent = '已恢复默认';
+    $('curationStatus').style.color = 'var(--green)';
+    setTimeout(function() { $('curationStatus').textContent = ''; }, 3000);
+  } catch (e) {}
 }
 
 // ─── 直播禁用 ──────────────
