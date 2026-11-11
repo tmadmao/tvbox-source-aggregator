@@ -108,6 +108,8 @@ export async function fetchPrefix(
     const res = await undiciRequest(url, opts as never);
     const contentType = String(res.headers['content-type'] || '');
     if (res.statusCode >= 400) {
+      // destroy 会异步 emit 'error'，必须先挂监听，否则未处理的 error 直接把进程带崩
+      res.body.on('error', () => { /* 忽略：只是主动丢弃错误响应体 */ });
       res.body.destroy();
       return { status: res.statusCode, contentType, data: Buffer.alloc(0), ms: Date.now() - started, timedOut: false };
     }
@@ -119,6 +121,11 @@ export async function fetchPrefix(
 
     await new Promise<void>((resolve) => {
       const done = () => resolve();
+      res.body.on('error', (e: Error) => {
+        if (/timeout|aborted/i.test(e.message)) timedOut = true;
+        else error = e.message;
+        done();
+      });
       res.body.on('data', (c: Buffer) => {
         chunks.push(c);
         total += c.length;
@@ -129,11 +136,6 @@ export async function fetchPrefix(
       });
       res.body.on('end', done);
       res.body.on('close', done);
-      res.body.on('error', (e: Error) => {
-        if (/timeout|aborted/i.test(e.message)) timedOut = true;
-        else error = e.message;
-        done();
-      });
     });
 
     return {
