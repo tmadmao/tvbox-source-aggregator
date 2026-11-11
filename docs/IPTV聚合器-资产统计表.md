@@ -43,9 +43,10 @@
 | `core/source-guarantee.ts` | 362 | 重点台输出前补测：从完整源池翻候选直到凑够配额；最终达标统计 |
 | `core/run-history.ts` | 223 | 调度执行记录（触发/状态/耗时/产出）、7 天裁剪、悬空 running 收尾、逐日汇总 |
 | `core/alerts.ts` | 226 | 失败/超时/漏跑告警（Webhook / Telegram）、6 小时去重、通知文案 |
+| `core/quality-guard.ts` | 456 | 源质量守夜：每小时重验重点台头部源、补缺口、从直播源清单发现新地址、只升不降地发布 |
 | `routes/scheduler-admin.ts` | 99 | 执行历史、告警配置与测试、质量缺口报表、质量保障开关 |
 | `routes/curation-admin.ts` | 63 | 编排规则读取/保存/恢复默认 |
-| `test/*.test.ts` + `scripts/test.js` | 714 | 48 个单测（tier / curation / ledger / host-health / run-history），esbuild + node:test，无新依赖 |
+| `test/*.test.ts` + `scripts/test.js` | 1195 | 50 个单测（tier / curation / ledger / host-health / run-history），esbuild + node:test，无新依赖 |
 
 `channel-curation.ts` 从 518 → 875 行：台序/配额/付费与海外排除名单全部 KV 驱动，合并后接质量编排。
 

@@ -34,6 +34,7 @@ import {
   KV_LIVE_GUARD_STATE,
   KV_LIVE_SOURCES,
   CHANNEL_PROBE_RULE_VERSION,
+  CHANNEL_DEAD_FAILS,
   GUARD_STALE_MS,
   GUARD_BUDGET_MS,
   GUARD_CONCURRENCY,
@@ -103,7 +104,11 @@ function rankCandidate(url: string, speedMap: ChannelSpeedMap, requireSegment: b
   const e = speedMap[url];
   const q = gradeOf(e, { requireSegment, now });
   if (q.verified) return 98;
-  if (e?.kind === 'fail') return 99;
+  if (e?.kind === 'fail') {
+    // 只失败一次可能只是抖动：下一轮守夜再验一次，别把好源直接拉黑
+    const fails = e.consecutiveFails ?? e.fails ?? 1;
+    return fails >= CHANNEL_DEAD_FAILS ? 99 : 3;
+  }
   switch (q.reason) {
     case 'stale': return 0;
     case 'unverified': return 1;
