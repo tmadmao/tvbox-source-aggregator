@@ -10,7 +10,10 @@ import * as dns from 'dns';
 import { createApp } from './routes';
 import { runAggregation } from './aggregator';
 import { runChannelProbe, isProbeEnabled } from './core/channel-probe';
-import { SQLiteStorage } from './storage/sqlite';
+// P0-1：不要在这里 import SQLiteStorage（哪怕 import type 也只为类型服务）。
+// SQLite 是「可选能力」，真实 require 只发生在 createStorage() 的 try 里；
+// 顶层 import 会让 esbuild 把 init_sqlite() 提到 main() 之前执行，
+// better-sqlite3 缺失时进程在加载期就退出，JSON 降级链永远没机会跑。
 import {
   DEFAULT_SPEED_TIMEOUT_MS,
   DEFAULT_SITE_TIMEOUT_MS,
@@ -18,12 +21,17 @@ import {
   KV_CRON_INTERVAL,
   DEFAULT_CRON_INTERVAL,
   CHANNEL_PROBE_CRON,
+  KV_CHANNEL_PROBE_INLINE,
+  MISSED_RUN_CHECK_CRON,
+  KV_MERGED_CONFIG,
+  KV_LIVE_GUARD_ENABLED,
+  LIVE_GUARD_CRON,
+  RUN_STALE_MS,
 } from './core/config';
 import type { Storage } from './storage/interface';
 import type { AppConfig } from './core/types';
 import { beginRun, finishRun, loadRunHistory, summarizeRuns, type RunStatus, type RunTrigger } from './core/run-history';
 import { loadAlertConfig, notifyRunFinished, notifyMissedRun } from './core/alerts';
-import { KV_MERGED_CONFIG, KV_LIVE_GUARD_ENABLED, LIVE_GUARD_CRON } from './core/config';
 import { APP_VERSION, APP_COMMIT } from './core/version';
 import { runQualityGuard } from './core/quality-guard';
 import { withProbeNet } from './core/probe-net';
@@ -116,12 +124,35 @@ function intervalLabel(minutes: number): string {
   return `${minutes / 1440}d`;
 }
 
+/** 能力探测：只有 SQLite 实现支持在线快照，不靠 instanceof（那需要顶层 import 类） */
+function canBackup(storage: Storage): storage is Storage & { backupTo(dest: string): Promise<void> } {
+  return typeof (storage as { backupTo?: unknown }).backupTo === 'function';
+}
+
 async function main() {
   const storage = createStorage();
   const port = parseInt(process.env.PORT || '') || 5678;
   const config = await buildConfig(port);
 
+  // 后台写接口一律要求 ADMIN_TOKEN（与 README 的「必填」一致）。
+  // 没配 token 时所有 /admin 请求都会 401，这里必须说出来 —— 否则用户只会看到
+  // 「页面能打开但什么都点不动」，很难联想到是环境变量缺失。
+  if (!config.adminToken) {
+    console.warn('');
+    console.warn('  ⚠️  未配置 ADMIN_TOKEN：后台接口将全部返回 401（页面可打开，但操作无效）');
+    console.warn('     请在 .env / docker-compose.yml 里设置 ADMIN_TOKEN=<你的管理密码>');
+    console.warn('');
+  }
+
+  // refreshRunning：对外的「正在跑」状态（后台按钮、守夜让路都用它）
+  // aggregationInFlight：底层 runAggregation 是否真的还没结束。
+  // 超时不等于底层停止 —— 只清 refreshRunning 会让下一轮 cron 与仍在写 KV 的上一轮并发，
+  // 而 saveSpeedMap / KV_MERGED_CONFIG 都是全量覆盖写，后写吞前写。
   let refreshRunning = false;
+  let aggregationInFlight = false;
+  let aggregationStartedAt = 0;
+  /** 每轮一个序号：超时放行后，旧任务收尾不能把新一轮的标志位清掉 */
+  let aggregationSeq = 0;
   const AGGREGATION_TIMEOUT_MS = 45 * 60 * 1000; // 聚合整体超时 45 分钟（含内联频道测速）
 
   /** 聚合完成后从产出里取几个数字写进执行记录，后台一眼能看出「跑了但产出异常」 */
@@ -146,19 +177,31 @@ async function main() {
   };
 
   const runWithGuard = async (trigger: RunTrigger = 'manual') => {
-    if (refreshRunning) {
+    // 安全阀：超时后我们等底层自己结束，但万一它彻底僵死（既不 resolve 也不 reject），
+    // 不能因此永久禁跑。超过 2×超时仍未收尾就强行放行，并大声记一笔。
+    const wedged = aggregationInFlight && Date.now() - aggregationStartedAt > AGGREGATION_TIMEOUT_MS * 2;
+    if ((refreshRunning || aggregationInFlight) && !wedged) {
       console.log('[aggregation] Already running, skipping');
       const rec = await beginRun(storage, 'aggregate', trigger, '上一轮仍在运行');
       await finishRun(storage, rec.id, { status: 'skipped', error: '上一轮仍在运行' });
       return;
     }
+    if (wedged) {
+      console.warn('[aggregation] previous run stuck > 90min without settling, forcing a new run (writes may interleave)');
+    }
     refreshRunning = true;
+    aggregationInFlight = true;
+    aggregationStartedAt = Date.now();
+    const myRun = ++aggregationSeq;
     const rec = await beginRun(storage, 'aggregate', trigger);
     let status: RunStatus = 'success';
     let error: string | undefined;
+    let timedOut = false;
+    // 底层任务只创建一次：超时后要能继续跟踪它，而不是把它丢掉
+    const task = runAggregation(storage, config);
     try {
       await Promise.race([
-        runAggregation(storage, config),
+        task,
         new Promise((_, reject) =>
           setTimeout(() => reject(new Error('Aggregation timed out')), AGGREGATION_TIMEOUT_MS),
         ),
@@ -167,9 +210,25 @@ async function main() {
       const msg = err instanceof Error ? err.message : String(err);
       status = /timed out/i.test(msg) ? 'timeout' : 'failed';
       error = msg;
+      timedOut = status === 'timeout';
       console.error(`[aggregation] Error: ${msg}`);
     } finally {
-      refreshRunning = false;
+      if (timedOut) {
+        // 超时只是「我们不等了」，底层还在写 KV。保持两个标志位，直到它真的结束：
+        // 这期间任何 cron / 手动触发都会被开头的检查挡掉，避免两轮并发全量覆盖。
+        console.warn('[aggregation] timed out, underlying run still in flight — blocking new runs until it settles');
+        void task
+          .catch(() => { /* 底层最终结果不影响本轮 timeout 记录 */ })
+          .finally(() => {
+            if (myRun !== aggregationSeq) return;   // 已经有新一轮接管，别动它的标志位
+            aggregationInFlight = false;
+            refreshRunning = false;
+            console.log('[aggregation] underlying run settled, new runs allowed');
+          });
+      } else {
+        aggregationInFlight = false;
+        refreshRunning = false;
+      }
       const stats = await readRunStats();
       const finished = await finishRun(storage, rec.id, { status, error, stats });
       if (finished) {
@@ -184,15 +243,20 @@ async function main() {
     }
   };
 
-  /** 漏跑自检：启动 30 秒后一次，之后每天 06:30 一次 */
+  /**
+   * 漏跑自检：每 6 小时一次（判据 25 小时，当天漏跑当天能发现）。
+   * 启动后先让「启动补跑」做完判定再检查，否则会先报一次「漏跑」再自己补上。
+   */
+  let startupCatchUpDone = false;
   const checkMissedRun = async () => {
+    if (!startupCatchUpDone) return;
     try {
       const summary = summarizeRuns(await loadRunHistory(storage));
       if (!summary.stale) return;
       const cfg = await loadAlertConfig(storage);
       const delivery = await notifyMissedRun(storage, cfg, summary);
       console.warn(
-        `[scheduler] 超过 26 小时没有成功聚合（上次成功：${summary.lastSuccess?.startedAt || '无'}）` +
+        `[scheduler] 超过 ${Math.round(RUN_STALE_MS / 3600000)} 小时没有成功聚合（上次成功：${summary.lastSuccess?.startedAt || '无'}）` +
         (delivery.sent ? '，已告警' : ''),
       );
     } catch (err) {
@@ -219,22 +283,34 @@ async function main() {
   // ─── 每日数据库快照 ──────────────────────────────────────
   // 库里有 5 万条源台账 + 全部配置，NAS 单点、没有别的备份手段。
   // 用 SQLite 的在线备份 API（不锁库），保留最近 7 份。
-  if (storage instanceof SQLiteStorage) {
+  if (canBackup(storage)) {
     const dataDir = path.resolve(process.env.DATA_DIR || path.join(process.cwd(), 'data'));
     const backupDir = path.join(dataDir, 'backup');
     const runBackup = async () => {
+      // 这是唯一备份手段（NAS 单点 + 5 万条台账），失败也要进执行记录与告警，
+      // 不能只留一行 console.warn
+      const rec = await beginRun(storage, 'backup', 'cron', '每日数据库快照');
+      let dest = '';
       try {
         if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
         const stamp = new Date().toISOString().replace(/[:T]/g, '').slice(0, 13); // yyyymmddHHmm
-        const dest = path.join(backupDir, `tvbox-${stamp}.db`);
+        dest = path.join(backupDir, `tvbox-${stamp}.db`);
         await storage.backupTo(dest);
         const files = fs.readdirSync(backupDir).filter((f) => f.startsWith('tvbox-') && f.endsWith('.db')).sort();
         for (const f of files.slice(0, Math.max(0, files.length - 7))) {
           fs.unlinkSync(path.join(backupDir, f));
         }
-        console.log(`[backup] snapshot written: ${dest} (${(fs.statSync(dest).size / 1048576).toFixed(0)}MB, keep 7)`);
+        const sizeMb = fs.statSync(dest).size / 1048576;
+        console.log(`[backup] snapshot written: ${dest} (${sizeMb.toFixed(0)}MB, keep 7)`);
+        await finishRun(storage, rec.id, { status: 'success', stats: { sizeMb: Math.round(sizeMb), kept: 7 } });
       } catch (err) {
-        console.warn(`[backup] failed: ${err instanceof Error ? err.message : String(err)}`);
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[backup] failed: ${msg}`);
+        const finished = await finishRun(storage, rec.id, { status: 'failed', error: msg });
+        if (finished) {
+          const cfg = await loadAlertConfig(storage);
+          await notifyRunFinished(storage, cfg, finished, summarizeRuns(await loadRunHistory(storage)));
+        }
       }
     };
     cron.schedule('30 5 * * *', () => { void runBackup(); });
@@ -256,7 +332,7 @@ async function main() {
 
   scheduleCron(initialSchedule);
 
-  // 频道测速独立 cron（每 12 小时，默认关闭）
+  // 频道测速独立 cron（每 2 小时，见 CHANNEL_PROBE_CRON；测速并入聚合时自动跳过）
   cron.schedule(CHANNEL_PROBE_CRON, async () => {
     const rec = await beginRun(storage, 'probe', 'probe', '独立测速 cron');
     try {
@@ -265,12 +341,14 @@ async function main() {
         return;
       }
       // 测速已并入聚合流程时，这条独立 cron 不再重复跑
-      if ((await storage.get('channel_probe_inline')) !== 'false') {
+      if ((await storage.get(KV_CHANNEL_PROBE_INLINE)) !== 'false') {
         await finishRun(storage, rec.id, { status: 'skipped', note: '测速已并入聚合' });
         return;
       }
       console.log(`[channel-probe-cron] Triggered at ${new Date().toISOString()}`);
-      const r = await runChannelProbe(storage);
+      // 必须隔离连接池：一轮上万次短连接，共享全局池会把同进程的其它请求整批挂住
+      // （probe-net.ts 头注释记录的那次「聚合卡 14 分钟」就是它）
+      const r = await withProbeNet(() => runChannelProbe(storage), { connections: 64 });
       await finishRun(storage, rec.id, {
         status: r.state === 'error' ? 'failed' : 'success',
         error: r.error,
@@ -318,10 +396,39 @@ async function main() {
   });
   console.log(`[guard] Scheduled: ${LIVE_GUARD_CRON} (hourly, auto repair)`);
 
-  // 漏跑自检：每天 06:30（北京时间）检查「昨天 5 点跑没跑」，启动后再补一次
-  cron.schedule('30 6 * * *', () => { void checkMissedRun(); });
-  setTimeout(() => { void checkMissedRun(); }, 30_000);
-  console.log('[scheduler] Missed-run check: 30 6 * * *, plus 30s after startup');
+  // 漏跑自检：每 6 小时一次（判据 25 小时 → 当天漏跑当天能发现）
+  // 启动那次留给下面的「启动补跑」判定，避免先报漏跑再自己补上
+  cron.schedule(MISSED_RUN_CHECK_CRON, () => { void checkMissedRun(); });
+  console.log(`[scheduler] Missed-run check: ${MISSED_RUN_CHECK_CRON}`);
+
+  // 启动补跑：容器重启若跨过了当天的聚合时刻，当天就这么空掉了 ——
+  // 光靠告警不产出配置，所以这里直接补一轮，补完再做漏跑自检。
+  const catchUpDelayMs = 60 * 1000;
+  setTimeout(() => {
+    void (async () => {
+      try {
+        const summary = summarizeRuns(await loadRunHistory(storage));
+        // 全新部署（没有任何执行记录）不算漏跑，交给正常 cron
+        if ((summary.last || summary.lastSuccess) && !refreshRunning && !aggregationInFlight) {
+          const lastOkMs = summary.lastSuccess ? Date.parse(summary.lastSuccess.startedAt) : 0;
+          // 宽限 15 分钟：刚跑完就重启不该再来一轮
+          const dueMs = intervalMin * 60 * 1000 + 15 * 60 * 1000;
+          if (!lastOkMs || Date.now() - lastOkMs >= dueMs) {
+            console.log(
+              `[scheduler] 启动补跑：上次成功 ${summary.lastSuccess?.startedAt || '无记录'}，` +
+              `已超过 ${Math.round(dueMs / 60000)} 分钟，立即补一轮聚合`,
+            );
+            await runWithGuard('startup');
+          }
+        }
+      } catch (err) {
+        console.warn(`[scheduler] startup catch-up failed: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        startupCatchUpDone = true;
+        void checkMissedRun();       // 补跑之后仍有缺口（例如补跑失败）才告警
+      }
+    })();
+  }, catchUpDelayMs);
 
   const app = createApp({
     storage,

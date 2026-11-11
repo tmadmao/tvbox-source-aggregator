@@ -40,6 +40,7 @@ import {
   GUARD_BUDGET_MS,
   GUARD_CONCURRENCY,
   GUARD_ALERT_AFTER,
+  KV_CHANNEL_PROBE_SEGMENT,
 } from './config';
 
 export interface GuardOptions {
@@ -76,10 +77,6 @@ export interface GuardResult {
 
 const PROBE_HARD_TIMEOUT_MS = 12000;
 let running = false;
-
-export function isGuardRunning(): boolean {
-  return running;
-}
 
 async function raceTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -204,7 +201,7 @@ export async function runQualityGuard(storage: Storage, opts: GuardOptions = {})
   }
 
   const rules = await loadCurationRules(storage);
-  const requireSegment = (await storage.get('channel_probe_segment')) !== 'false';
+  const requireSegment = (await storage.get(KV_CHANNEL_PROBE_SEGMENT)) !== 'false';
   const map = await loadSpeedMap(storage);
   const staleMs = Math.max(30 * 60 * 1000, opts.staleMs ?? GUARD_STALE_MS);
   const budgetMs = Math.max(60_000, opts.budgetMs ?? GUARD_BUDGET_MS);
@@ -268,7 +265,9 @@ export async function runQualityGuard(storage: Storage, opts: GuardOptions = {})
   let partial = false;
 
   const probeOne = async (task: Task, url: string): Promise<boolean> => {
-    const r = await raceTimeout(probeUrlOnce(url), PROBE_HARD_TIMEOUT_MS);
+    // 分片复验开关必须传进去：界面关掉它就该真的少发分片请求，
+    // 而不是照测一遍、只在评分时放宽（那是两套语义）
+    const r = await raceTimeout(probeUrlOnce(url, false, requireSegment), PROBE_HARD_TIMEOUT_MS);
     task.probed++;
     probed++;
     if (!r) return false;                   // 硬超时：不写结论，下一轮再来
@@ -372,12 +371,49 @@ export async function runQualityGuard(storage: Storage, opts: GuardOptions = {})
     const totalBefore = tasks.reduce((n, t) => n + t.beforeVerified, 0);
     const totalAfter = tasks.reduce((n, t) => n + t.afterVerified, 0);
     if (totalAfter < totalBefore) {
-      // 只升不降：算出来变差就保持原样，等下一轮
-      return {
+      // 「只升不降」只该管住**发布**，不该管住**记账**。
+      //
+      // 这里曾经直接 return，跳过 saveSpeedMap / removeRecoveredUrls / touchProbed /
+      // 连续缺口计数 / 报表。后果是永久死锁：totalBefore 每轮都从落盘的 map 重算，
+      // map 不落盘 → 下一轮的同名基线一模一样 → 再早退 → 永远卡在同一个值上，
+      // 守夜「在跑、不做事、不告警」。所以先无条件记账，再只跳过发布。
+      if (probed > 0) await saveSpeedMap(storage, map, { merge: true });
+
+      let revivedEarly = 0;
+      if (recovered.size > 0) {
+        revivedEarly = await removeRecoveredUrls(storage, [...recovered]);
+        if (revivedEarly > 0) console.log(`[guard] ${revivedEarly} URLs recovered, removed from dead ledger`);
+      }
+      if (stillDead.size > 0) await touchProbed(storage, [...stillDead]);
+
+      const earlyGaps = tasks
+        .filter((t) => t.afterVerified < t.quota)
+        .map((t) => ({ group: t.group.group || '', name: t.name, tier: t.tier, verified: t.afterVerified, quota: t.quota }));
+
+      // 连续缺口计数也要走：否则「连续 3 轮补不上才告警」这条永远攒不满
+      let earlyState: Record<string, number> = {};
+      try {
+        const rawState = await storage.get(KV_LIVE_GUARD_STATE);
+        if (rawState) earlyState = JSON.parse(rawState);
+      } catch { /* ignore */ }
+      const earlyKeys = new Set<string>();
+      for (const g of earlyGaps) {
+        const k = `${g.tier}|${g.name}`;
+        earlyKeys.add(k);
+        earlyState[k] = (earlyState[k] || 0) + 1;
+      }
+      for (const k of Object.keys(earlyState)) if (!earlyKeys.has(k)) delete earlyState[k];
+      await storage.put(KV_LIVE_GUARD_STATE, JSON.stringify(earlyState));
+
+      const earlyResult: GuardResult = {
         state: 'noop', checked: tasks.length, probed, repaired: 0, changed: 0, addedUrls,
-        gaps: tasks.filter((t) => t.afterVerified < t.quota).map((t) => ({ group: t.group.group || '', name: t.name, tier: t.tier, verified: t.afterVerified, quota: t.quota })),
-        published: false, elapsedMs: Date.now() - started, note: 'regression-guard',
+        gaps: earlyGaps,
+        published: false, revived: revivedEarly,
+        elapsedMs: Date.now() - started, note: 'regression-guard',
       };
+      // 本轮结论不发布，但仍要让运维看见「守夜跑过、本轮整体变差」
+      await storage.put(KV_LIVE_GUARD_REPORT, JSON.stringify({ at: new Date().toISOString(), ...earlyResult }));
+      return earlyResult;
     }
 
     let changed = 0;
@@ -400,7 +436,7 @@ export async function runQualityGuard(storage: Storage, opts: GuardOptions = {})
     }
 
     gaps = tasks.filter((t) => t.afterVerified < t.quota);
-    if (probed > 0) await saveSpeedMap(storage, map);
+    if (probed > 0) await saveSpeedMap(storage, map, { merge: true });
 
     // 与死源台账互通：复活即出档，仍死则把 7/30 天回测周期从这次重新计时
     let revived = 0;

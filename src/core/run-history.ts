@@ -82,24 +82,43 @@ function clone(runs: RunHistory): RunHistory {
   return runs.map((r) => ({ ...r }));
 }
 
+/**
+ * 执行记录的读改写串行化。
+ *
+ * beginRun / finishRun 都是「读全表 → 改一条 → 写全表」。聚合、独立测速、守夜
+ * 三个 cron 完全可能同时进入：并发写会让其中一次的结果覆盖掉另一次
+ * （例如守夜的 finishRun 把刚写入的 probe running 记录整条抹掉）。
+ * 进程内的简单队列就够 —— 这个 KV 只有本进程在写。
+ */
+let historyQueue: Promise<unknown> = Promise.resolve();
+
+function withHistoryLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = historyQueue.then(fn, fn);
+  // 吞掉错误只用于让队列继续，真实错误仍由 run 抛出给调用方
+  historyQueue = run.then(() => undefined, () => undefined);
+  return run;
+}
+
 export async function beginRun(
   storage: Storage,
   kind: RunKind,
   trigger: RunTrigger,
   note?: string,
 ): Promise<RunRecord> {
-  const runs = await loadRunHistory(storage);
-  const rec: RunRecord = {
-    id: `${new Date().toISOString()}-${kind}`,
-    kind,
-    trigger,
-    startedAt: new Date().toISOString(),
-    status: 'running',
-    note,
-  };
-  runs.push(rec);
-  await saveRunHistory(storage, runs);
-  return rec;
+  return withHistoryLock(async () => {
+    const runs = await loadRunHistory(storage);
+    const rec: RunRecord = {
+      id: `${new Date().toISOString()}-${kind}`,
+      kind,
+      trigger,
+      startedAt: new Date().toISOString(),
+      status: 'running',
+      note,
+    };
+    runs.push(rec);
+    await saveRunHistory(storage, runs);
+    return rec;
+  });
 }
 
 export async function finishRun(
@@ -107,22 +126,24 @@ export async function finishRun(
   id: string,
   patch: Partial<Pick<RunRecord, 'status' | 'error' | 'note' | 'stats'>>,
 ): Promise<RunRecord | null> {
-  const runs = await loadRunHistory(storage);
-  const idx = runs.findIndex((r) => r.id === id);
-  if (idx < 0) return null;
-  const cur = runs[idx];
-  const endMs = Date.now();
-  const startMs = Date.parse(cur.startedAt);
-  const next: RunRecord = {
-    ...cur,
-    ...patch,
-    status: patch.status ?? cur.status,
-    finishedAt: new Date(endMs).toISOString(),
-    durationMs: isFinite(startMs) ? Math.max(0, endMs - startMs) : undefined,
-  };
-  runs[idx] = next;
-  await saveRunHistory(storage, runs);
-  return next;
+  return withHistoryLock(async () => {
+    const runs = await loadRunHistory(storage);
+    const idx = runs.findIndex((r) => r.id === id);
+    if (idx < 0) return null;
+    const cur = runs[idx];
+    const endMs = Date.now();
+    const startMs = Date.parse(cur.startedAt);
+    const next: RunRecord = {
+      ...cur,
+      ...patch,
+      status: patch.status ?? cur.status,
+      finishedAt: new Date(endMs).toISOString(),
+      durationMs: isFinite(startMs) ? Math.max(0, endMs - startMs) : undefined,
+    };
+    runs[idx] = next;
+    await saveRunHistory(storage, runs);
+    return next;
+  });
 }
 
 // ─── 汇总（纯函数，便于单测） ──────────────────────────
@@ -139,7 +160,7 @@ export interface RunSummary {
   lastSuccess?: RunRecord;
   lastFailure?: RunRecord;
   consecutiveFailures: number;
-  /** 超过 26 小时没有成功 → 视为漏跑 */
+  /** 超过 RUN_STALE_MS（25 小时）没有成功 → 视为漏跑 */
   stale: boolean;
   staleHours: number;
   today: { total: number; success: number; failed: number; running: number };

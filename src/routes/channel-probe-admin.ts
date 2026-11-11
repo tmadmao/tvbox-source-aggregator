@@ -2,6 +2,7 @@
 
 import type { Hono } from 'hono';
 import type { Storage } from '../storage/interface';
+import { verifyAdmin } from '../core/admin-auth';
 import type { AppConfig } from '../core/types';
 import {
   isProbeEnabled,
@@ -13,16 +14,16 @@ import {
   clearSpeedMap,
 } from '../core/channel-probe';
 import { addDeadUrls, loadDeadUrls, loadDeadRows, clearDeadUrls, ledgerStats, DEAD_RETEST_MS, CONDEMNED_RETEST_MS } from '../core/live-deadlist';
-import { KV_LIVE_DEAD_URLS, KV_CHANNEL_MERGED_TREE, KV_CHANNEL_SPEED_MAP } from '../core/config';
+import {
+  KV_LIVE_DEAD_URLS,
+  KV_CHANNEL_MERGED_TREE,
+  KV_CHANNEL_SPEED_MAP,
+  KV_CHANNEL_PROBE_INLINE,
+  KV_CHANNEL_PROBE_SEGMENT,
+} from '../core/config';
 import { loadHostRows, saveHostRows, hostStats, hostOf, HOST_MIN_URLS, HOST_SUSPECT_RETEST_MS, HOST_DEAD_RETEST_MS } from '../core/host-health';
 import { bareUrl } from '../core/live-url';
-
-function verifyAdmin(request: Request, config: AppConfig): boolean {
-  const token = config.adminToken;
-  if (!token) return false;
-  const auth = request.headers.get('Authorization');
-  return auth === `Bearer ${token}`;
-}
+import { withProbeNet } from '../core/probe-net';
 
 export interface ChannelProbeRouteDeps {
   storage: Storage;
@@ -68,26 +69,26 @@ export function mountChannelProbeRoutes(app: Hono, deps: ChannelProbeRouteDeps):
   // GET / PUT /admin/channel-probe/inline — 测速是否并入聚合流程
   app.get('/admin/channel-probe/inline', async (c) => {
     if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
-    return c.json({ enabled: (await storage.get('channel_probe_inline')) !== 'false' });
+    return c.json({ enabled: (await storage.get(KV_CHANNEL_PROBE_INLINE)) !== 'false' });
   });
 
   app.put('/admin/channel-probe/inline', async (c) => {
     if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
     const body = await c.req.json<{ enabled: boolean }>();
-    await storage.put('channel_probe_inline', body.enabled ? 'true' : 'false');
+    await storage.put(KV_CHANNEL_PROBE_INLINE, body.enabled ? 'true' : 'false');
     return c.json({ success: true, enabled: body.enabled });
   });
 
   // GET / PUT /admin/channel-probe/segment — L2 分片复验开关
   app.get('/admin/channel-probe/segment', async (c) => {
     if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
-    return c.json({ enabled: (await storage.get('channel_probe_segment')) !== 'false' });
+    return c.json({ enabled: (await storage.get(KV_CHANNEL_PROBE_SEGMENT)) !== 'false' });
   });
 
   app.put('/admin/channel-probe/segment', async (c) => {
     if (!verifyAdmin(c.req.raw, config)) return c.json({ error: 'Unauthorized' }, 401);
     const body = await c.req.json<{ enabled: boolean }>();
-    await storage.put('channel_probe_segment', body.enabled ? 'true' : 'false');
+    await storage.put(KV_CHANNEL_PROBE_SEGMENT, body.enabled ? 'true' : 'false');
     return c.json({ success: true, enabled: body.enabled });
   });
 
@@ -109,8 +110,10 @@ export function mountChannelProbeRoutes(app: Hono, deps: ChannelProbeRouteDeps):
       return c.json({ success: false, error: 'Probe is disabled, enable it first' }, 400);
     }
     // 异步启动；仅在「测速未并入聚合」时，跑完补一次重建让排序生效
-    const inline = (await storage.get('channel_probe_inline')) !== 'false';
-    runChannelProbe(storage)
+    const inline = (await storage.get(KV_CHANNEL_PROBE_INLINE)) !== 'false';
+    // 手动触发同样要走独立连接池：这是「一轮上万次短连接」，裸跑会把
+    // 同进程正在进行的聚合/守夜探测整批挂住（详见 probe-net.ts 头注释）
+    withProbeNet(() => runChannelProbe(storage), { connections: 64 })
       .then(() => {
         if (!inline && triggerRefresh) return triggerRefresh();
       })

@@ -8,7 +8,7 @@
 // 告警本身绝不能拖垮聚合：所有发送都吞异常 + 8 秒超时，并做去重（同一类 6 小时内只发一次）。
 
 import type { Storage } from '../storage/interface';
-import { KV_ALERT_CONFIG, KV_ALERT_LAST } from './config';
+import { KV_ALERT_CONFIG, KV_ALERT_LAST, RUN_STALE_MS } from './config';
 import type { RunRecord, RunSummary } from './run-history';
 
 export interface AlertConfig {
@@ -191,7 +191,7 @@ export async function notifyRunFinished(
   if (run.error) lines.push(`原因：${run.error}`);
   if (summary.consecutiveFailures > 1) lines.push(`连续失败：${summary.consecutiveFailures} 次`);
   if (summary.lastSuccess) lines.push(`上次成功：${summary.lastSuccess.startedAt}`);
-  if (summary.stale) lines.push('⚠️ 已超过 26 小时没有成功聚合');
+  if (summary.stale) lines.push(`⚠️ 已超过 ${staleHours()} 小时没有成功聚合`);
   return sendAlert(storage, cfg, {
     key: `run:${run.kind}:${run.status}`,
     level: failed ? 'error' : 'info',
@@ -200,7 +200,12 @@ export async function notifyRunFinished(
   });
 }
 
-/** 漏跑检查：启动时与每天 06:30 调用 */
+/** 判据小时数：文案与常量同源，改 RUN_STALE_MS 不用再改文案 */
+function staleHours(): number {
+  return Math.round(RUN_STALE_MS / 3600000);
+}
+
+/** 漏跑检查：每 6 小时一次 + 启动后一次（见 node-entry） */
 export async function notifyMissedRun(
   storage: Storage,
   cfg: AlertConfig,
@@ -208,7 +213,7 @@ export async function notifyMissedRun(
 ): Promise<AlertDelivery> {
   if (!summary.stale) return { sent: false, skipped: 'fresh' };
   const lines = [
-    '状态：超过 26 小时没有成功聚合',
+    `状态：超过 ${staleHours()} 小时没有成功聚合（判据 RUN_STALE_MS）`,
     summary.lastSuccess ? `上次成功：${summary.lastSuccess.startedAt}` : '上次成功：无记录',
     summary.lastFailure ? `最近失败：${summary.lastFailure.startedAt} ${summary.lastFailure.error || ''}` : '',
     '请检查定时任务、容器状态与源站可达性。',
@@ -221,6 +226,3 @@ export async function notifyMissedRun(
   });
 }
 
-export function formatRunLine(run: RunRecord): string {
-  return `${run.startedAt} ${run.kind} ${run.status} ${fmtDuration(run.durationMs)}${run.error ? ` - ${run.error}` : ''}`;
-}
