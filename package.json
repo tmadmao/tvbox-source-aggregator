@@ -21,7 +21,8 @@
     "better-sqlite3": "^11.7.0",
     "dotenv": "^16.4.0",
     "hono": "^4.7.0",
-    "node-cron": "^3.0.3"
+    "node-cron": "^3.0.3",
+    "undici": "^5.29.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241230.0",
