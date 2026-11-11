@@ -125,6 +125,7 @@ async function readTextUpTo(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   first: Uint8Array | undefined,
   maxBytes: number,
+  deadline = Date.now() + 6000,
 ): Promise<string> {
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -133,7 +134,11 @@ async function readTextUpTo(
     total += first.length;
   }
   while (total < maxBytes) {
-    const { value, done } = await reader.read();
+    const remain = deadline - Date.now();
+    if (remain <= 0) break;
+    const r = await readWithTimeout(reader, remain);
+    if (r.timedOut) break;
+    const { value, done } = r;
     if (done || !value) break;
     chunks.push(value);
     total += value.length;
@@ -149,11 +154,28 @@ async function readTextUpTo(
   return new TextDecoder().decode(buf.subarray(0, off));
 }
 
+/** 读一 chunk，超时返回 timedOut；用于避免 abort 正在读的 body（Node 20 undici 会崩） */
+async function readWithTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  ms: number,
+): Promise<{ value?: Uint8Array; done?: boolean; timedOut?: boolean }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ timedOut: true }>((resolve) => {
+    timer = setTimeout(() => resolve({ timedOut: true }), Math.max(1, ms));
+  });
+  try {
+    return await Promise.race([reader.read(), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** 读二进制直到 maxBytes，返回拼接后的 buffer（用于 TS/FLV 头校验） */
 async function readBytesUpTo(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   first: Uint8Array | undefined,
   maxBytes: number,
+  deadline = Date.now() + 6000,
 ): Promise<Uint8Array> {
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -162,7 +184,11 @@ async function readBytesUpTo(
     total += first.length;
   }
   while (total < maxBytes) {
-    const { value, done } = await reader.read();
+    const remain = deadline - Date.now();
+    if (remain <= 0) break;
+    const r = await readWithTimeout(reader, remain);
+    if (r.timedOut) break;
+    const { value, done } = r;
     if (done || !value) break;
     chunks.push(value);
     total += value.length;
@@ -214,11 +240,12 @@ async function fetchTextQuick(url: string, maxBytes = 32768): Promise<string | n
   const timer = setTimeout(() => ctl.abort(), CHANNEL_PROBE_SEGMENT_TIMEOUT_MS);
   try {
     const resp = await netFetch(url, { signal: ctl.signal, headers: { 'User-Agent': TVBOX_UA } });
+    clearTimeout(timer);
     if (!resp.ok) return null;
     const reader = resp.body?.getReader();
     if (!reader) return null;
     try {
-      return await readTextUpTo(reader, undefined, maxBytes);
+      return await readTextUpTo(reader, undefined, maxBytes, Date.now() + CHANNEL_PROBE_SEGMENT_TIMEOUT_MS);
     } finally {
       clearTimeout(timer);
       reader.cancel().catch(() => {});
@@ -236,9 +263,11 @@ async function probeSegment(url: string): Promise<{ ok: boolean; bytes: number; 
   const timer = setTimeout(() => ctl.abort(), CHANNEL_PROBE_SEGMENT_TIMEOUT_MS);
   try {
     const resp = await netFetch(url, { signal: ctl.signal, headers: { 'User-Agent': TVBOX_UA } });
+    // 头已拿到：后续读 body 不能再 abort，否则 Node 20 undici 会抛
+    // ERR_INVALID_STATE: Controller is already closed，直接把进程带崩。
+    clearTimeout(timer);
     if (!resp.ok) return { ok: false, bytes: 0, note: `分片 HTTP ${resp.status}` };
     const ctype = (resp.headers.get('content-type') || '').toLowerCase();
-    // 200 也可能是错误页/JSON，先按类型排除，别把 HTML 当视频
     if (/text\/html|application\/json|text\/plain/.test(ctype)) {
       return { ok: false, bytes: 0, note: `分片类型 ${ctype.split(';')[0]}` };
     }
@@ -247,11 +276,15 @@ async function probeSegment(url: string): Promise<{ ok: boolean; bytes: number; 
 
     let got = 0;
     const readStart = Date.now();
+    const deadline = readStart + CHANNEL_PROBE_SEGMENT_TIMEOUT_MS;
     try {
       while (got < CHANNEL_PROBE_SEGMENT_BYTES) {
-        const { value, done } = await reader.read();
-        if (done || !value) break;
-        got += value.length;
+        const remain = deadline - Date.now();
+        if (remain <= 0) return { ok: false, bytes: got, note: '分片超时' };
+        const r = await readWithTimeout(reader, remain);
+        if (r.timedOut) return { ok: false, bytes: got, note: '分片超时' };
+        if (r.done || !r.value) break;
+        got += r.value.length;
       }
     } finally {
       clearTimeout(timer);
@@ -350,6 +383,10 @@ export async function probeUrlOnce(url: string, skipL2 = false): Promise<OnceRes
       headers: { 'User-Agent': TVBOX_UA },
     });
     const ttfb = Date.now() - start;
+    // 头到了就停掉 abort：后面读 body 时再 abort 会触发 undici 的
+    // ERR_INVALID_STATE，进程直接退出。body 超时交给 readWithTimeout。
+    clearTimeout(timer);
+    const deadline = start + CHANNEL_PROBE_TIMEOUT_MS;
 
     if (!resp.ok) {
       clearTimeout(timer);
@@ -363,7 +400,11 @@ export async function probeUrlOnce(url: string, skipL2 = false): Promise<OnceRes
     }
 
     try {
-      const { value } = await reader.read();
+      const firstRead = await readWithTimeout(reader, Math.max(1, deadline - Date.now()));
+      if (firstRead.timedOut) {
+        return { speedMs: 0, kind: 'fail', timedOut: true };
+      }
+      const value = firstRead.value;
       if (!value) {
         return { speedMs: ttfb, kind: 'tcp', timedOut: false };
       }
@@ -375,7 +416,7 @@ export async function probeUrlOnce(url: string, skipL2 = false): Promise<OnceRes
 
       if (playlistLike) {
         // 列表本身很小（几 KB），读完再判断；只看前 1KB 会漏掉后面的 #EXT-X-STREAM-INF
-        const playlist = await readTextUpTo(reader, value, 64 * 1024);
+        const playlist = await readTextUpTo(reader, value, 64 * 1024, deadline);
         if (!playlist.includes('#EXTM3U')) {
           return { speedMs: 0, kind: 'fail', timedOut: false, stage: 'playlist', note: '不是 m3u8' };
         }
@@ -405,7 +446,10 @@ export async function probeUrlOnce(url: string, skipL2 = false): Promise<OnceRes
       }
 
       // 读满 64KB：只读到首包就判活，会放过「开头出数据、随后卡死」的源
-      const buf = await readBytesUpTo(reader, value, CHANNEL_PROBE_SEGMENT_BYTES);
+      const buf = await readBytesUpTo(
+        reader, value, CHANNEL_PROBE_SEGMENT_BYTES,
+        Date.now() + CHANNEL_PROBE_SEGMENT_TIMEOUT_MS,
+      );
       const elapsed = Math.max(1, Date.now() - start);
       const kbps = Math.round((buf.length / 1024) / (elapsed / 1000));
       if (buf.length < CHANNEL_PROBE_SEGMENT_MIN_BYTES) {

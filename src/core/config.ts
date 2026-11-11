@@ -143,7 +143,7 @@ export const KV_SOURCE_MAP = 'builder_source_map'; // { sites: Record, parses: R
 // 频道测速 cron：每 2 小时（只重测缓存已过期的 URL，不会全量重刷）
 export const CHANNEL_PROBE_CRON = '0 */2 * * *';
 // 并发与超时（1.6 万 URL 全量一轮，100 并发 ≈ 10 分钟量级）
-export const CHANNEL_PROBE_CONCURRENCY = 100;
+export const CHANNEL_PROBE_CONCURRENCY = 64;
 export const CHANNEL_PROBE_TIMEOUT_MS = 5000;
 // 每个 URL 采样次数（取成功样本的中位数，降低单次抖动）
 export const CHANNEL_PROBE_SAMPLES = 2;
