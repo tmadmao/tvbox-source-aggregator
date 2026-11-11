@@ -280,7 +280,7 @@ export async function runQualityGuarantee(
     for (let i = 0; i < budgetForChannel && verified < task.quota; i++) {
       if (Date.now() > deadline) { budgetExhausted = true; break; }
       const cand = candidates[i];
-      const r = await raceTimeout(probeUrlOnce(cand.bare), PROBE_HARD_TIMEOUT_MS);
+      const r = await raceTimeout(probeUrlOnce(cand.bare, false, requireSegment), PROBE_HARD_TIMEOUT_MS);
       task.probed++;
       probed++;
       if (!r) continue;                   // 硬超时：不写结论，留待下一轮
@@ -297,6 +297,9 @@ export async function runQualityGuarantee(
       requireSegment,
       now: Date.now(),
     });
+    // 全死台保留原池（而不是留空）：让缺口报表能区分「无源」与「有源全死」。
+    // 代价要说清楚：这一支会把**已知不可播**的地址发到客户端（黑名单只过滤
+    // deadSet / 判死域名，不看这层回退）。缺口报表里的 allDead 就是这类台。
     ch.urls = after.urls.length > 0 ? after.urls : task.poolUrls;
     task.after = after;
   }

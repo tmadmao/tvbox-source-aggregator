@@ -142,15 +142,21 @@ export interface HostProbeOutcome {
  * 把一轮抽样结果写回域名台账。
  * - 抽样里有任何一条通 → 域名恢复正常，撤销记录
  * - 抽样全部失败 → 状态至少是「可疑」；可疑满 30 天 → 判死
+ *
+ * 返回的 `touched` 是「本轮真正改过内存行」的条数（含只刷新 probedAt 的情况）。
+ * 调用方必须按它决定是否落盘：只判 revived/marked/condemned 会漏掉最常见的
+ * 「已有行又测了一次、状态没变」——那种情况下 probedAt 的更新会随函数返回蒸发，
+ * 复验周期（7 天 / 30 天）永远不前进，抽样就退化成每轮重抽。
  */
 export function applyHostOutcomes(
   rows: Map<string, HostRow>,
   outcomes: HostProbeOutcome[],
   now = Date.now(),
-): { revived: number; marked: number; condemned: number } {
+): { revived: number; marked: number; condemned: number; touched: number } {
   let revived = 0;
   let marked = 0;
   let condemned = 0;
+  let touched = 0;
 
   for (const o of outcomes) {
     if (o.probed === 0) continue;
@@ -159,9 +165,10 @@ export function applyHostOutcomes(
     if (o.ok === 0 && o.probed < HOST_MIN_URLS) continue;
     const cur = rows.get(o.host);
     if (o.ok > 0) {
-      if (cur) { rows.delete(o.host); revived++; }
+      if (cur) { rows.delete(o.host); revived++; touched++; }
       continue;
     }
+    touched++;      // 全失败：不管新入账还是刷新 probedAt，都改动了台账
     if (cur) {
       cur.state = (now - (cur.since || now) >= HOST_DEAD_AFTER_MS) ? 2 : 1;
       cur.probedAt = now;
@@ -171,7 +178,7 @@ export function applyHostOutcomes(
       marked++;
     }
   }
-  return { revived, marked, condemned };
+  return { revived, marked, condemned, touched };
 }
 
 export interface HostStats {

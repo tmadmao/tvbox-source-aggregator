@@ -14,7 +14,7 @@
 import type { ChannelSpeedEntry, ChannelSpeedMap } from './types';
 import { bareUrl, hostOf } from './live-url';
 import { tierOf, scoreOf } from './source-health';
-import { CHANNEL_DEAD_FAILS } from './config';
+import { CHANNEL_DEAD_FAILS, QUALITY_FAST_MS, QUALITY_SLOW_MS } from './config';
 
 export type ChannelTier = 'cctv' | 'satellite' | 'local' | 'other';
 
@@ -52,10 +52,12 @@ export const TIER_CANDIDATE_LIMIT: Record<ChannelTier, number> = {
   other: 0,
 };
 
-/** 「快」的硬线：客户端 5 秒超时，留一半余量，超过 2.5 秒开播就有风险 */
-export const QUALITY_FAST_MS = 2500;
-/** 「能看」的硬线：超过 4.5 秒基本必撞客户端超时 */
-export const QUALITY_SLOW_MS = 4500;
+/**
+ * 「快 / 慢」阈值统一在 config.ts 定义（QUALITY_FAST_MS / QUALITY_SLOW_MS）。
+ * 这里保留导出名，历史调用方与测试不受影响；排序分（source-health）用的是同一组值，
+ * 不会再出现「3000ms 的源排序速度分为 0、分级却算可用」这种两套标准。
+ */
+export { QUALITY_FAST_MS, QUALITY_SLOW_MS };
 /** 判定新鲜度：超过 6 小时（= 测速 TTL）的结论不算「本轮验证」 */
 export const QUALITY_FRESH_MS = 6 * 60 * 60 * 1000;
 
@@ -216,10 +218,12 @@ export function arrangeSources(
   }
   // 第二轮：可播但域名撞车，也要把配额补满 —— 总比留空位让客户端少试一条强
   if (head.length < quota) {
+    const headSet = new Set(head);
     for (const it of verifiedItems) {
       if (head.length >= quota) break;
-      if (head.includes(it)) continue;
+      if (headSet.has(it)) continue;
       head.push(it);
+      headSet.add(it);
       if (it.host) usedHosts.add(it.host);
     }
   }

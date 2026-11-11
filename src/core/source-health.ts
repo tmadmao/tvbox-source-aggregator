@@ -4,6 +4,7 @@
 // 判定（能不能播）仍由 channel-probe 决定，这里不重复实现判定逻辑。
 
 import type { ChannelSpeedEntry, ChannelSpeedMap } from './types';
+import { QUALITY_FAST_MS } from './config';
 
 /** 历史保留轮数（位图长度） */
 export const HEALTH_HISTORY_LEN = 12;
@@ -15,7 +16,7 @@ export interface HealthSnapshot {
   samples: number;        // 累计轮次
 }
 
-/** 把这一轮结果压进 history 位图（左移一位，末尾追加 1/0） */
+/** 把这一轮结果压进 history 位图（保持最近 12 轮：右侧追加 1/0，超长裁掉最旧的） */
 export function pushHistory(prev: string | undefined, ok: boolean): string {
   const old = (prev || '').slice(-HEALTH_HISTORY_LEN);
   const next = old + (ok ? '1' : '0');
@@ -34,6 +35,9 @@ export function recordProbe(
 ): ChannelSpeedEntry {
   const prev = map[url];
   const ok = r.kind !== 'fail';
+  // `consecutiveFails` 与 `fails` 是同一语义的两个字段（历史遗留，读的地方会混用
+  // `??` 兜底）。既然这里是唯一写入点，就由同一个值派生，避免某天只更新一个而分叉。
+  const nextFails = ok ? 0 : ((prev?.consecutiveFails ?? prev?.fails ?? 0) + 1);
   const entry: ChannelSpeedEntry = {
     ...(prev || {}),
     speedMs: ok ? r.speedMs : 0,
@@ -43,8 +47,8 @@ export function recordProbe(
     okCount: (prev?.okCount ?? 0) + (ok ? 1 : 0),
     failCount: (prev?.failCount ?? 0) + (ok ? 0 : 1),
     history: pushHistory(prev?.history, ok),
-    consecutiveFails: ok ? 0 : (prev?.consecutiveFails ?? prev?.fails ?? 0) + 1,
-    fails: ok ? 0 : (prev?.fails ?? 0) + 1,
+    consecutiveFails: nextFails,
+    fails: nextFails,
   };
   if (ok) {
     entry.lastOkAt = when;
@@ -73,7 +77,8 @@ export function availabilityOf(entry: ChannelSpeedEntry | undefined): number {
   return entry.kind === 'fail' ? 0 : 1;
 }
 
-const SPEED_FLOOR_MS = 3000;
+/** 速度分归零点：与分级里的「快」用同一条线（config.ts 单一来源） */
+const SPEED_FLOOR_MS = QUALITY_FAST_MS;
 
 export function scoreOf(entry: ChannelSpeedEntry | undefined): number {
   if (!entry) return 0;

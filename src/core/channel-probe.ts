@@ -17,9 +17,11 @@ import {
   CHANNEL_PROBE_SEGMENT_MIN_BYTES,
   CHANNEL_PROBE_SEGMENT_MIN_KBPS,
   CHANNEL_SPEED_TTL_MS,
+  CHANNEL_SPEED_MAP_KEEP_MS,
   CHANNEL_DEAD_RECHECK_MS,
   CHANNEL_PROBE_RULE_VERSION,
   CHANNEL_DEAD_FAILS,
+  KV_CHANNEL_PROBE_SEGMENT,
   TVBOX_UA,
 } from './config';
 import { extractAllUrls } from './live-merger';
@@ -91,11 +93,45 @@ export async function loadSpeedMap(storage: Storage): Promise<ChannelSpeedMap> {
   }
 }
 
-export async function saveSpeedMap(storage: Storage, map: ChannelSpeedMap): Promise<void> {
-  await storage.put(KV_CHANNEL_SPEED_MAP, JSON.stringify(map));
+/**
+ * 写回测速缓存。
+ *
+ * 两个坑：
+ *  1) 落盘前裁掉物理过期项（7 天），否则这张表只增不减；
+ *  2) `merge=true` 用于「只改了一部分条目」的写入方（守夜、输出前复核、聚合头部复核）。
+ *     它们各自 load → 改几条 → 全量写，两个任务并发时后写会把前写的改动整段抹掉
+ *     （全量覆盖写 + 无锁）。合并策略按 probedAt 取新者，互不覆盖。
+ *     全量测速自己那一路（map 是从当前频道树重建的）必须保持 replace 语义，
+ *     否则频道树里已经消失的 URL 会被旧缓存复活。
+ */
+export async function saveSpeedMap(
+  storage: Storage,
+  map: ChannelSpeedMap,
+  opts: { merge?: boolean } = {},
+): Promise<void> {
+  let out = map;
+  if (opts.merge) {
+    try {
+      const raw = await storage.get(KV_CHANNEL_SPEED_MAP);
+      if (raw) {
+        const disk = JSON.parse(raw) as ChannelSpeedMap;
+        const merged: ChannelSpeedMap = { ...disk };
+        for (const [url, mine] of Object.entries(map)) {
+          const theirs = disk[url];
+          if (!theirs) { merged[url] = mine; continue; }
+          const tMine = Date.parse(mine.probedAt) || 0;
+          const tTheirs = Date.parse(theirs.probedAt) || 0;
+          merged[url] = tMine >= tTheirs ? mine : theirs;
+        }
+        out = merged;
+      }
+    } catch {
+      // 磁盘内容坏了就整段覆盖，至少本轮结论不丢
+    }
+  }
+  await storage.put(KV_CHANNEL_SPEED_MAP, JSON.stringify(pruneExpired(out)));
 }
 
-/** 清理 7 天前的测速缓存 */
 /**
  * 清空测速缓存，强制下一轮全量重测。
  * 用途：改了判定规则（比如这次加了分片复验）之后，旧结论不能再用，否则要等 TTL 到期。
@@ -106,12 +142,18 @@ export async function clearSpeedMap(storage: Storage): Promise<number> {
   return Object.keys(before).length;
 }
 
-export function pruneExpired(map: ChannelSpeedMap): ChannelSpeedMap {
-  const now = Date.now();
+/**
+ * 裁掉物理过期的条目（7 天）。
+ *
+ * 注意与 `CHANNEL_SPEED_TTL_MS`（6 小时）的区别：那个是「该重测了」，
+ * 这个是「留着也没用了」。不裁的结果是 channel_speed_map 只增不减 ——
+ * 历史 URL 全留着，单 key 体积一直涨（CF 侧单 value 有 25MB 上限）。
+ */
+export function pruneExpired(map: ChannelSpeedMap, now = Date.now()): ChannelSpeedMap {
   const out: ChannelSpeedMap = {};
   for (const [url, entry] of Object.entries(map)) {
     const ts = Date.parse(entry.probedAt);
-    if (isFinite(ts) && now - ts < CHANNEL_SPEED_TTL_MS) {
+    if (isFinite(ts) && now - ts < CHANNEL_SPEED_MAP_KEEP_MS) {
       out[url] = entry;
     }
   }
@@ -225,7 +267,7 @@ interface ProbeResult {
   note?: string;
 }
 
-/** L2 分片复验开关；由 runChannelProbe 读取 KV 后设置，默认开启 */
+/** L2 分片复验开关；由 runChannelProbe 读 KV 后设置（也可由调用方按次传入），默认开启 */
 let segmentCheckEnabled = true;
 
 export function setSegmentCheckEnabled(v: boolean): void {
@@ -240,7 +282,12 @@ export interface OnceResult {
   note?: string;
 }
 
-export async function probeUrlOnce(url: string, skipL2 = false): Promise<OnceResult> {
+/**
+ * @param skipL2  本次强制只看清单（多次采样时后续采样用）
+ * @param requireSegment 本次的分片复验开关；不传则用模块级设置
+ */
+export async function probeUrlOnce(url: string, skipL2 = false, requireSegment?: boolean): Promise<OnceResult> {
+  const segEnabled = requireSegment ?? segmentCheckEnabled;
   const isM3U8 = /\.m3u8(\?|$)/i.test(url);
   const isTs = /\.(ts|flv|mp4)(\?|$)/i.test(url);
 
@@ -270,7 +317,7 @@ export async function probeUrlOnce(url: string, skipL2 = false): Promise<OnceRes
     if (!playlist.includes('#EXTM3U')) {
       return { speedMs: 0, kind: 'fail', timedOut: false, stage: 'playlist', note: '不是 m3u8' };
     }
-    if (!segmentCheckEnabled || skipL2) {
+    if (!segEnabled || skipL2) {
       return { speedMs: r.ms, kind: 'm3u8', timedOut: false, stage: 'playlist' };
     }
     const check = await verifyPlayable(playlist, url);
@@ -446,6 +493,11 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
 
   const urls = extractAllUrls(groups);
   const totalChannels = groups.reduce((n, g) => n + g.channels.length, 0);
+
+  // 把界面上的「L2 分片复验」开关真正接进探测路径。
+  // 以前这个 KV 只被评分侧读成 requireSegment（放宽分数），探测侧照旧发分片请求，
+  // 等于「关了开关只是判得松一点」，与界面承诺不符。
+  setSegmentCheckEnabled((await storage.get(KV_CHANNEL_PROBE_SEGMENT)) !== 'false');
   /**
    * 测速优先级：央视 → 卫视 → 地方台 → 其他。
    *
@@ -565,8 +617,8 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
      * 这样把「一两万条死链每周全测一遍」压到「两千个域名各抽 3 条」。
      */
     const hostMap = await loadHostMap(storage);
-    const sampledHosts = new Set<string>();
     const toProbe: string[] = [];
+    let sampledHosts = 0;
     {
       const byHost = new Map<string, string[]>();
       for (const u of staleUrls) {
@@ -585,7 +637,7 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
           continue;
         }
         const picked = sampleHostUrls(list, quota);
-        if (picked.length < list.length) sampledHosts.add(h);
+        if (picked.length < list.length) sampledHosts++;
         toProbe.push(...picked);
       }
       toProbe.sort((a, b) => {
@@ -604,7 +656,8 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
     const outdatedCount = urls.filter(isOutdated).length;
     console.log(
       `[channel-probe] ${toProbe.length} URLs to probe ` +
-      `(${freshCount} fresh, ${outdatedCount} from older rules, ttl=${Math.round(CHANNEL_SPEED_TTL_MS / 3600000)}h)`,
+      `(${freshCount} fresh, ${sampledHosts} hosts sampled, ${outdatedCount} from older rules, ` +
+      `ttl=${Math.round(CHANNEL_SPEED_TTL_MS / 3600000)}h)`,
     );
 
     // 只保留仍在当前频道树里的 URL（老 URL 自然淘汰）
@@ -688,10 +741,14 @@ export async function runChannelProbe(storage: Storage): Promise<ChannelProbeSta
     }
     if (outcomes.length > 0) {
       const applied = applyHostOutcomes(hostMap, outcomes, Date.now());
-      if (applied.revived || applied.marked || applied.condemned) {
+      // 落盘条件必须是「本轮改过台账」而不是「计数非 0」：
+      // 已有域名再次抽样全失败时 revived/marked/condemned 都可能为 0，
+      // 但 probedAt 必须刷新，否则 7 天 / 30 天的复验周期永远不前进（P0-2）。
+      if (applied.touched > 0) {
         await saveHostRows(storage, [...hostMap.values()]);
         console.log(
-          `[channel-probe] host ledger: revived=${applied.revived} marked=${applied.marked} condemned=${applied.condemned}`,
+          `[channel-probe] host ledger: revived=${applied.revived} marked=${applied.marked} ` +
+          `condemned=${applied.condemned} touched=${applied.touched}`,
         );
       }
     }

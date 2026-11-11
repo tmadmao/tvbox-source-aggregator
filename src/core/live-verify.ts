@@ -20,6 +20,8 @@ export interface ReverifyOptions {
   perHost?: number;
   /** 整轮复核的时间预算（毫秒），超时就收工，默认 8 分钟 */
   budgetMs?: number;
+  /** L2 分片复验开关（与测速口径一致），默认开启 */
+  requireSegment?: boolean;
 }
 
 /**
@@ -51,6 +53,8 @@ export interface ReverifyStats {
   promoted: number;
   /** 首位不通过但后面也没有可用源的频道数 */
   allDead: number;
+  /** 全部候选都硬超时（结论未知，未写健康数据）的频道数 */
+  unknown: number;
   /** 实际发出的探测请求数 */
   requests: number;
   elapsedMs: number;
@@ -112,7 +116,7 @@ export async function reverifyHeadSources(
   const started = Date.now();
   const deadline = started + budgetMs;
 
-  const stats: ReverifyStats = { checked: 0, promoted: 0, allDead: 0, requests: 0, elapsedMs: 0 };
+  const stats: ReverifyStats = { checked: 0, promoted: 0, allDead: 0, unknown: 0, requests: 0, elapsedMs: 0 };
   console.log(`[live-verify] start: channels=${groups.reduce((n, g) => n + (g.channels || []).length, 0)} concurrency=${concurrency} perHost=${perHost} budget=${Math.round(budgetMs / 1000)}s`);
   const gate: HostGate = { counts: new Map(), waiters: new Map() };
 
@@ -145,6 +149,7 @@ export async function reverifyHeadSources(
       }
 
       let firstOk = -1;
+      let timedOutAll = true;
       for (let i = 0; i < urls.length; i++) {
         const bare = bareUrl(urls[i]);
         if (!bare) continue;
@@ -152,14 +157,18 @@ export async function reverifyHeadSources(
         await acquire(gate, host, perHost);
         let r: Awaited<ReturnType<typeof probeUrlOnce>> | null = null;
         try {
-          r = await raceTimeout(probeUrlOnce(bare), PROBE_HARD_TIMEOUT_MS);
+          r = await raceTimeout(probeUrlOnce(bare, false, opts.requireSegment), PROBE_HARD_TIMEOUT_MS);
         } finally {
           release(gate, host);
         }
         if (!r) {
-          // 硬超时：记一次失败，别让这台的判定永远悬着
-          r = { speedMs: 0, kind: 'fail', timedOut: true, note: 'hard-timeout' } as Awaited<ReturnType<typeof probeUrlOnce>>;
+          // 硬超时：这是「外层调度/连接池退化」的信号，不是源的问题。
+          // 以前这里伪造一次 fail 并 recordProbe，等于把自己的拥塞记到被探测的源头上，
+          // 好源可能被自己 12s 的超时推向 dead。与 quality-guard / source-guarantee
+          // 的口径对齐：不写结论，只放弃这一条，继续试下一条。
+          continue;
         }
+        timedOutAll = false;
         applyResult(bare, r);
         if (r.kind !== 'fail') {
           firstOk = i;
@@ -168,7 +177,8 @@ export async function reverifyHeadSources(
       }
 
       if (firstOk < 0) {
-        stats.allDead++;
+        if (timedOutAll) stats.unknown++;
+        else stats.allDead++;
         continue;
       }
       if (firstOk > 0) {

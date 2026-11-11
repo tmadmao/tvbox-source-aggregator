@@ -173,14 +173,16 @@ export async function condemnExpired(
   storage: Storage,
   isStillDead: (url: string) => boolean,
   now = Date.now(),
-): Promise<{ promoted: number; total: number }> {
+): Promise<{ promoted: number; total: number; backfilled: number }> {
   const rows = await loadDeadRows(storage);
   let promoted = 0;
+  let backfilled = 0;
   for (const r of rows) {
     if (r.state === 2) continue;
     const since = r.since || r.probedAt || 0;
     if (!since) {
       r.since = now;          // 死亡时间未知 → 从现在开始计时，避免一上来就判死
+      backfilled++;
       continue;
     }
     if (now - since < CONDEMN_AFTER_MS) continue;
@@ -188,8 +190,10 @@ export async function condemnExpired(
     r.state = 2;
     promoted++;
   }
-  if (promoted > 0) await saveRows(storage, rows);
-  return { promoted, total: rows.length };
+  // 只按 promoted 落盘会丢掉 since 的回填：未知年龄的死源本轮若没有别的条目被判死，
+  // 回填就随函数返回蒸发，判死时钟永远不启动（P2-9）。
+  if (promoted > 0 || backfilled > 0) await saveRows(storage, rows);
+  return { promoted, total: rows.length, backfilled };
 }
 
 export interface LedgerStats {

@@ -24,14 +24,13 @@ import { loadFtpConfig, uploadLiveTxt } from './core/ftp-sync';
 import { loadSkipList, addSkipList } from './core/site-skip';
 import { bareUrl } from './core/live-url';
 import { loadSpeedMap as loadChannelSpeedMap, saveSpeedMap, runChannelProbe, isProbeEnabled } from './core/channel-probe';
-import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_CHANNEL_MERGED_TREE, KV_AGG_LOGS, AGG_LOGS_MAX, KV_SITE_SNAPSHOT, KV_SITE_KEEP_LINK, KV_CHANNEL_PROBE_INLINE, KV_LIVE_HEAD_VERIFY, KV_LIVE_TOP_N, KV_LIVE_USE_CONFIG_LIVES, KV_LIVE_HIDE_DEAD, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, BASE_URL_PLACEHOLDER, KV_SITE_HEALTH_MAP, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SOURCE_MAP, KV_LIVE_QUALITY_GUARANTEE, KV_LIVE_QUALITY_GAP, QUALITY_GUARANTEE_BUDGET_MS } from './core/config';
-import { loadBlacklist, applyBlacklist, pruneBlacklist, saveBlacklist, siteFingerprint } from './core/blacklist';
+import { KV_MERGED_CONFIG, KV_MERGED_CONFIG_FULL, KV_SOURCE_URLS, KV_LAST_UPDATE, KV_MANUAL_SOURCES, KV_MACCMS_SOURCES, KV_LIVE_SOURCES, KV_BLACKLIST, KV_INLINE_PREFIX, KV_NAME_TRANSFORM, KV_SOURCE_HEALTH, KV_SPEED_TEST_ENABLED, KV_EDGE_PROXIES, KV_SEARCH_QUOTA_REPORT, KV_CHANNEL_MERGED_TREE, KV_AGG_LOGS, AGG_LOGS_MAX, KV_SITE_SNAPSHOT, KV_SITE_KEEP_LINK, KV_CHANNEL_PROBE_INLINE, KV_CHANNEL_PROBE_SEGMENT, KV_LIVE_HEAD_VERIFY, KV_LIVE_TOP_N, KV_LIVE_USE_CONFIG_LIVES, KV_LIVE_HIDE_DEAD, KV_DEDUP_CONFIG, KV_LIVE_DISABLED, KV_LIVE_MERGE_MODE, BASE_URL_PLACEHOLDER, KV_SITE_HEALTH_MAP, KV_SITE_PROBE_DEPTH, KV_SITE_AUTO_CLEAN, KV_SITE_FP, KV_SOURCE_MAP, KV_LIVE_QUALITY_GUARANTEE, KV_LIVE_QUALITY_GAP, QUALITY_GUARANTEE_BUDGET_MS } from './core/config';
+import { loadBlacklist, applyBlacklist, pruneBlacklist, saveBlacklist, computeFingerprints, siteFingerprintCached } from './core/blacklist';
 import { transformSiteNames } from './core/cleaner';
 import { parseConfigJson, type FetchProxyConfig } from './core/fetcher';
 import { scrapeSourceList, scrapeMacCMSSources, type ScrapeSourceConfig, type ScrapeMacCMSConfig } from './core/source-scraper';
 import { loadSearchQuota, applySearchQuota } from './core/search-quota';
-import { loadCredentials } from './core/credential-store';
-import { loadCredentialPolicy } from './core/credential-store';
+import { loadCredentials, loadCredentialPolicy, ensureCredentialTokenSecret } from './core/credential-store';
 import { injectCredentials } from './core/credential-injector';
 import { loadGroupOrder, applyGroupOrder } from './core/group-order';
 import { deduplicateSimilarNames } from './core/dedup';
@@ -314,14 +313,30 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
     merged = transformSiteNames(merged, {});
   }
 
+  // Step 5.6: 站点指纹（必须在凭证注入之前算）
+  //
+  // 指纹里含 ext，而注入会改写 ext。若在注入前后各算一次，黑名单（Step 4，注入前）
+  // 与跳过名单（Step 6，注入后）用的是两套哈希，永远不相交；凭证一刷新（重新扫码、
+  // cookie 重取），跳过名单里几百条还会集体失配、全部恢复探测。
+  // 这里算一次，后面 skip 过滤 / 自动清理 / 配置编辑器全部复用。
+  const siteFpCache = await computeFingerprints(merged.sites || []);
+  if (siteFpCache.size > 0) {
+    await storage.put(KV_SITE_FP, JSON.stringify({
+      v: 1,
+      at: new Date().toISOString(),
+      map: Object.fromEntries(siteFpCache),
+    }));
+  }
+
   // Step 5.7: 网盘凭证注入
   const credentials = await loadCredentials(storage);
   if (credentials.size > 0 && merged.sites && merged.sites.length > 0) {
     logger.info('aggregation', 'Step 5.7: Injecting cloud credentials...');
     const credentialPolicy = await loadCredentialPolicy(storage);
     const jarBaseUrl = config.workerBaseUrl || config.localBaseUrl;
+    const credTokenUrl = `${jarBaseUrl}/credential/${await ensureCredentialTokenSecret(storage)}/token.json`;
     const { sites: injectedSites, report: injReport } = injectCredentials(
-      merged.sites, credentials, credentialPolicy, jarBaseUrl,
+      merged.sites, credentials, credentialPolicy, jarBaseUrl, credTokenUrl,
     );
     merged.sites = injectedSites;
     logger.infoFields('aggregation', 'credentials-injected', {
@@ -344,13 +359,14 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   if (!speedTestEnabled) {
     logger.info('aggregation', 'Step 6: Speed test disabled, skipping');
   } else if (merged.sites && merged.sites.length > 0) {
-    // 「保留链接」模式下，被判定不可达的站点留在输出里，但不再重复探测（省掉大量超时等待）
+    // 「保留链接」模式下，被判定不可达的站点留在输出里，但不再重复探测（省掉大量超时等待）。
+    // 指纹必须用注入前算好的那份，否则凭证刷新后整份跳过名单失配（P1-9）
     const skipList = new Set(await loadSkipList(storage));
     let probeTargets = merged.sites;
     if (skipList.size > 0) {
       const kept = [];
       for (const site of merged.sites) {
-        const fp = await siteFingerprint(site);
+        const fp = await siteFingerprintCached(site, siteFpCache);
         if (!skipList.has(fp)) kept.push(site);
       }
       probeTargets = kept;
@@ -383,7 +399,7 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
     }
 
     // 更新站点健康状态 & 自动标记/屏蔽
-    await updateSiteHealth(storage, siteProbeMap, merged);
+    await updateSiteHealth(storage, siteProbeMap, merged, siteFpCache);
   } else {
     logger.info('aggregation', 'Step 6: No sites to test');
   }
@@ -413,7 +429,7 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   // 编排规则外置到 KV：台序、每台保留条数、各档保底条数、付费/海外排除名单都在这里。
   // 读一次，后面的合并过滤、黑名单豁免、质量保障、编排共用同一份。
   const curationRules = await loadCurationRules(storage);
-  const requireSegment = (await storage.get('channel_probe_segment')) !== 'false';
+  const requireSegment = (await storage.get(KV_CHANNEL_PROBE_SEGMENT)) !== 'false';
   let qualityStats: GuaranteeStats | null = null;
 
   // Step 6.5: 直播源频道级合并（方案 D+）
@@ -625,7 +641,7 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
       qMap,
       { rules: curationRules, requireSegment, budgetMs: QUALITY_GUARANTEE_BUDGET_MS },
     ));
-    await saveSpeedMap(storage, qMap);
+    await saveSpeedMap(storage, qMap, { merge: true });
     qualityStats = result.stats;
     await storage.put(KV_LIVE_QUALITY_GAP, JSON.stringify({
       at: new Date().toISOString(),
@@ -667,12 +683,13 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
     const { stats } = await withProbeNet(() => reverifyHeadSources(
       merged.lives as unknown as TVBoxLiveGroup[],
       verifyMap,
+      { requireSegment },
     ));
     if (stats.requests > 0) {
-      await saveSpeedMap(storage, verifyMap);
+      await saveSpeedMap(storage, verifyMap, { merge: true });
       logger.infoFields('aggregation', 'head-reverify-done', {
         channels: stats.checked, promoted: stats.promoted, allDead: stats.allDead,
-        requests: stats.requests, ms: stats.elapsedMs,
+        unknown: stats.unknown, requests: stats.requests, ms: stats.elapsedMs,
       });
     }
   }
@@ -993,6 +1010,7 @@ async function updateSiteHealth(
   storage: Storage,
   probeMap: Map<string, SiteProbeResult>,
   merged: { sites?: TVBoxSite[] },
+  fpCache?: Map<string, string>,
 ): Promise<void> {
   if (probeMap.size === 0) return;
 
@@ -1041,7 +1059,7 @@ async function updateSiteHealth(
       if (cleaned >= MAX_AUTO_CLEAN) break;
       const h = healthMap[site.key];
       if (h && h.consecutiveFailures >= 5) {
-        const fp = await siteFingerprint(site);
+        const fp = await siteFingerprintCached(site, fpCache);
         if (keepLink) {
           // 保留链接：不删站点，只记入跳过名单，后续聚合不再探测它
           if (!skipFps.includes(fp)) {
