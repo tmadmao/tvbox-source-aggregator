@@ -14,6 +14,7 @@
 import type { ChannelSpeedEntry, ChannelSpeedMap } from './types';
 import { bareUrl, hostOf } from './live-url';
 import { tierOf, scoreOf } from './source-health';
+import { CHANNEL_DEAD_FAILS } from './config';
 
 export type ChannelTier = 'cctv' | 'satellite' | 'local' | 'other';
 
@@ -39,7 +40,7 @@ export const TIER_LABEL: Record<ChannelTier, string> = {
 export const DEFAULT_TIER_QUOTA: Record<ChannelTier, number> = {
   cctv: 6,
   satellite: 5,
-  local: 3,
+  local: 2,
   other: 2,
 };
 
@@ -87,7 +88,14 @@ export function gradeOf(
   const requireSegment = opts.requireSegment !== false;
 
   if (!entry) return { grade: 2, verified: false, reason: 'untested' };
-  if (entry.kind === 'fail') return { grade: 3, verified: false, reason: 'dead' };
+  if (entry.kind === 'fail') {
+    // 一次失败可能只是抖动，先降级留观；连续失败到阈值才彻底不输出，
+    // 否则「输出前复核」偶发一次超时就会把好源永久踢出前排。
+    const fails = entry.consecutiveFails ?? entry.fails ?? 1;
+    return fails >= CHANNEL_DEAD_FAILS
+      ? { grade: 3, verified: false, reason: 'dead' }
+      : { grade: 2, verified: false, reason: 'failed-once' };
+  }
 
   const t = Date.parse(entry.probedAt);
   if (!isFinite(t) || now - t > QUALITY_FRESH_MS) {
@@ -287,7 +295,13 @@ export function buildGapReport(
 ): QualityGap[] {
   const tierRank = new Map(TIER_ORDER.map((t, i) => [t, i]));
   return rows
-    .filter((r) => r.tier !== 'other' && r.verified < r.quota)
+    .filter((r) => {
+      if (r.tier === 'other' || r.verified >= r.quota) return false;
+      // 地方台里「本来就只有 1 条源」的台不列缺口：这不是质量问题，是覆盖问题。
+      // 用户明确说过不为这类台盲目补源；这里只报「有候选但都播不了」的台。
+      if (r.tier === 'local' && r.pool < 2) return false;
+      return true;
+    })
     .map((r) => ({ ...r, rate: r.pool > 0 ? r.verified / r.pool : 0 }))
     .sort((a, b) => {
       const ta = tierRank.get(a.tier) ?? 9;

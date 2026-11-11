@@ -3552,7 +3552,7 @@ function fillCurationRules(r) {
   var q = r.quotas || {};
   $('quotaCctv').value = q.cctv == null ? 6 : q.cctv;
   $('quotaSatellite').value = q.satellite == null ? 5 : q.satellite;
-  $('quotaLocal').value = q.local == null ? 3 : q.local;
+  $('quotaLocal').value = q.local == null ? 2 : q.local;
 }
 
 function readLines(id) {

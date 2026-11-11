@@ -101,10 +101,15 @@ interface ChannelTask {
   probed: number;
 }
 
-/** 该频道是否属于「要保」的范围：央视 / 卫视 / 重点地方台 */
-function shouldGuarantee(tier: ChannelTier, name: string, rules: CurationRules): boolean {
+/**
+ * 该频道是否属于「要保」的范围：央视 / 卫视 / 重点地方台。
+ *
+ * 地方台额外要求「至少 2 条候选」：只有 1 条源的台属于覆盖问题，不是质量问题，
+ * 用户明确说过不值得为这类台盲目补源 —— 它们不进配额统计，也不进缺口报表。
+ */
+function shouldGuarantee(tier: ChannelTier, name: string, rules: CurationRules, pool: number): boolean {
   if (tier === 'cctv' || tier === 'satellite') return true;
-  if (tier === 'local') return isPriorityLocal(name, rules);
+  if (tier === 'local') return isPriorityLocal(name, rules) && pool >= 2;
   return false;
 }
 
@@ -123,6 +128,64 @@ function candidateRank(url: string, speedMap: ChannelSpeedMap, requireSegment: b
     case 'shaky': return 3;
     default: return 4;                // untested / unknown-speed
   }
+}
+
+export interface CoverageReport {
+  channels: number;
+  coverage: TierCoverage[];
+  gaps: QualityGap[];
+}
+
+/**
+ * 用「最终输出树」重新统计达标情况。
+ *
+ * 为什么不能直接用 runQualityGuarantee 的统计：
+ *   质量保障跑在「编排/同名合并」之前，同一个 CCTV1 可能以 3 种写法各算一台，
+ *   报出来的「69 个央视台」是拆开的，和用户看到的 44 个对不上。
+ *   这里在合并、改名、隐藏全死台之后重新数一遍，后台与文档只认这一份。
+ */
+export function buildCoverageReport(
+  groups: TVBoxLiveGroup[],
+  speedMap: ChannelSpeedMap,
+  rules: CurationRules,
+  requireSegment = true,
+  now = Date.now(),
+): CoverageReport {
+  const rows: Array<{
+    group: string; name: string; tier: ChannelTier;
+    verified: number; quota: number; pool: number; hosts: number;
+  }> = [];
+
+  for (const g of groups) {
+    for (const ch of g.channels || []) {
+      const tier = tierOfChannel(g.group || '', ch.name, rules);
+      const pool = (ch.urls || []).length;
+      if (!shouldGuarantee(tier, ch.name, rules, pool)) continue;
+      const quota = rules.quotas[tier] ?? 0;
+      if (quota <= 0) continue;
+      const arr = arrangeSources(ch.urls || [], speedMap, {
+        quota,
+        cap: rules.focusSources,
+        requireSegment,
+        now,
+      });
+      rows.push({
+        group: g.group || '其他',
+        name: ch.name,
+        tier,
+        verified: arr.verified,
+        quota,
+        pool,
+        hosts: arr.distinctHosts,
+      });
+    }
+  }
+
+  return {
+    channels: rows.length,
+    coverage: tierCoverage(rows, rules.quotas),
+    gaps: buildGapReport(rows, 120),
+  };
 }
 
 export async function runQualityGuarantee(
@@ -145,7 +208,8 @@ export async function runQualityGuarantee(
     if (!Array.isArray(group.channels)) continue;
     group.channels.forEach((ch, idx) => {
       const tier = tierOfChannel(group.group || '', ch.name, rules);
-      if (!shouldGuarantee(tier, ch.name, rules)) return;
+      const poolSize = (ch.urls || []).length;
+      if (!shouldGuarantee(tier, ch.name, rules, poolSize)) return;
       const quota = rules.quotas[tier] ?? 0;
       if (quota <= 0) return;
       const poolUrls = [...(ch.urls || [])];

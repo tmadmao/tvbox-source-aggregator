@@ -35,6 +35,20 @@
 | `routes/channel-order-admin.ts` | 222 | 频道排序 / 分组归并 / 购物过滤 / 配置源 lives 开关 | 7eac2ad 起 |
 | `routes/channel-probe-admin.ts` | 155 | 测速启停、清理死源、回滚、清缓存 | ab9986d 起 |
 
+### 1.4 2.2.0 新增（分级质量 / 调度可观测 / 规则外置）
+
+| 模块 | 行数 | 职责 |
+|---|---|---|
+| `core/channel-tier.ts` | 308 | 频道分档（央视/卫视/地方）、源质量分级（分片+2.5s+新鲜度）、输出前排编排、缺口报表 |
+| `core/source-guarantee.ts` | 300 | 重点台输出前补测：从完整源池翻候选直到凑够配额；最终达标统计 |
+| `core/run-history.ts` | 223 | 调度执行记录（触发/状态/耗时/产出）、7 天裁剪、悬空 running 收尾、逐日汇总 |
+| `core/alerts.ts` | 226 | 失败/超时/漏跑告警（Webhook / Telegram）、6 小时去重、通知文案 |
+| `routes/scheduler-admin.ts` | 99 | 执行历史、告警配置与测试、质量缺口报表、质量保障开关 |
+| `routes/curation-admin.ts` | 63 | 编排规则读取/保存/恢复默认 |
+| `test/*.test.ts` + `scripts/test.js` | 616 | 42 个单测（tier / curation / ledger / host-health / run-history），esbuild + node:test，无新依赖 |
+
+`channel-curation.ts` 从 518 → 718 行：台序改由 KV 驱动、合并后接质量编排。
+
 ---
 
 ## 二、外部资产（朋友分支 `upstream/fix/parser-and-source-cache`）
@@ -73,8 +87,9 @@
 
 | 项 | 位置 | 说明 |
 |---|---|---|
-| 部署脚本 | `dev/nas-update.sh` | 编译 → 打包 → scp → 重启，约 15 秒 |
-| NAS 目录 | `/volume2/docker/tvbox-aggregator/` | `data/`（数据库）、`dist/`（挂载）、`src/`（可重建镜像） |
+| 部署脚本 | `dev/nas-update.sh` | 上传源码 → NAS 上 `docker build`（打 `<sha>` 标签）→ `compose up --no-build` → 校验 `/version`，约 60 秒（缓存） |
+| NAS 目录 | `/volume2/docker/tvbox-aggregator/` | `data/`（数据库）、`_build/`（构建上下文）、镜像 `tvbox-aggregator:<sha>`；**不再挂载 `dist`** |
+| 开发热更新 | `dev/docker-compose.dev.yml` | 额外挂 `dist`，只用于开发；正式部署不要带 |
 | 并行验证实例 | `/volume2/docker/tvbox-friend/` | 朋友分支的移植验证，端口 5679，已停用，保留作参考 |
 | 测试夹具 | `dev/fixture-server.mjs` | 模拟配置源/m3u/ts 流，不依赖第三方源 |
 | 真实数据样本 | `dev/data/live-config.txt` | 3683 频道 / 17515 源，回归用 |

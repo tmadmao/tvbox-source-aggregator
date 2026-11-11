@@ -15,7 +15,7 @@ import { withProbeNet } from './core/probe-net';
 import { trimGroupsToTopN } from './core/live-url';
 import { loadChannelOrder, applyChannelOrder } from './core/live-order';
 import { loadOverrides, curateGroups, isFocusChannel, loadCurationRules } from './core/channel-curation';
-import { runQualityGuarantee } from './core/source-guarantee';
+import { runQualityGuarantee, buildCoverageReport, type GuaranteeStats } from './core/source-guarantee';
 import { loadRegistry, saveRegistry, upsertFromGroups } from './core/channel-registry';
 import { loadLiveGroupMerge } from './core/live-groups';
 import { loadShoppingFilter } from './core/live-filters';
@@ -539,6 +539,7 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
   // 读一次，后面的黑名单豁免、质量保障、编排共用同一份，避免三处各自读盘。
   const curationRules = await loadCurationRules(storage);
   const requireSegment = (await storage.get('channel_probe_segment')) !== 'false';
+  let qualityStats: GuaranteeStats | null = null;
 
   // Step 6.6: 死源黑名单过滤（管理后台「清理死源」按钮写入）
   // 只过滤输出，不影响测速：测速仍按完整频道树跑，源恢复后会自动移出黑名单
@@ -613,6 +614,7 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
       { rules: curationRules, requireSegment, budgetMs: QUALITY_GUARANTEE_BUDGET_MS },
     ));
     await saveSpeedMap(storage, qMap);
+    qualityStats = result.stats;
     await storage.put(KV_LIVE_QUALITY_GAP, JSON.stringify({
       at: new Date().toISOString(),
       stats: result.stats,
@@ -708,6 +710,30 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
       }
       merged.lives = keptGroups as never;
       logger.infoFields('aggregation', 'dead-channels-hidden', { hidden, leftGroups: keptGroups.length });
+    }
+
+    // 用**最终输出树**重算达标情况：合并同名、改名、隐藏全死台之后，
+    // 数字才和电视上真正看到的频道对得上（保障阶段那会儿 CCTV1 还有 3 种写法）。
+    try {
+      const finalReport = buildCoverageReport(
+        merged.lives as TVBoxLiveGroup[], curateSpeedMap, curationRules, requireSegment,
+      );
+      await storage.put(KV_LIVE_QUALITY_GAP, JSON.stringify({
+        at: new Date().toISOString(),
+        stats: qualityStats,
+        coverage: finalReport.coverage,
+        gaps: finalReport.gaps,
+        channels: finalReport.channels,
+      }));
+      logger.infoFields('aggregation', 'quality-coverage', {
+        channels: finalReport.channels,
+        ...Object.fromEntries(finalReport.coverage
+          .filter((x) => x.channels > 0)
+          .map((x) => [x.tier, `${x.met}/${x.channels}`])),
+        gaps: finalReport.gaps.length,
+      });
+    } catch (err) {
+      logger.warn('aggregation', `quality coverage failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     // 编排会把频道改成正式名（江苏·南京新闻 → 南京新闻综合），目录要跟着补槽，

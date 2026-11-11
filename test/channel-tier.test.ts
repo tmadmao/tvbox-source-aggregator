@@ -44,6 +44,15 @@ test('gradeOf：死链 = 3，不参与保底', () => {
   assert.equal(q.verified, false);
 });
 
+test('gradeOf：单次失败只降级留观，不直接判死', () => {
+  const m = mapOf(['http://a/x.m3u8', {
+    speedMs: 0, probedAt: new Date().toISOString(), kind: 'fail', fails: 1,
+  }]);
+  const q = gradeOf(m['http://a/x.m3u8']);
+  assert.equal(q.grade, 2);
+  assert.equal(q.reason, 'failed-once');
+});
+
 test('gradeOf：只拿到清单、没验分片 = 未证实', () => {
   const m = mapOf(ok('http://a/x.m3u8', 800, { stage: 'playlist' }));
   assert.equal(gradeOf(m['http://a/x.m3u8']).reason, 'unverified');
