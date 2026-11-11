@@ -64,6 +64,19 @@ test('只出现在一个频道的地址不动', () => {
   assert.equal(groups[1].channels[0].urls.length, 1);
 });
 
+test('CCTV5 / CCTV5+ / CCTV5高清 平票：归 + 变体，另两个清掉', () => {
+  const groups = [
+    group('CCTV5', [`${URL}$a`]),
+    group('CCTV5+', [`${URL}$b`]),
+    group('CCTV5高清', [`${URL}$c`]),
+  ];
+  const removed = resolveCrossChannelConflicts(groups);
+  assert.equal(groups[0].channels[0].urls.length, 0);
+  assert.equal(groups[1].channels[0].urls.length, 1);
+  assert.equal(groups[2].channels[0].urls.length, 0);
+  assert.equal(removed.length, 2);
+});
+
 test('三个频道抢同一地址：票最多者得，其余清掉', () => {
   const groups = [
     group('CCTV5', [`${URL}$a`, `${URL}$b`]),

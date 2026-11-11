@@ -15,6 +15,7 @@ import { withProbeNet } from './core/probe-net';
 import { trimGroupsToTopN } from './core/live-url';
 import { loadChannelOrder, applyChannelOrder } from './core/live-order';
 import { loadOverrides, curateGroups, isFocusChannel, loadCurationRules, applyChannelExclusions } from './core/channel-curation';
+import { resolveCrossChannelConflicts } from './core/channel-conflicts';
 import { runQualityGuarantee, buildCoverageReport, type GuaranteeStats } from './core/source-guarantee';
 import { loadRegistry, saveRegistry, upsertFromGroups } from './core/channel-registry';
 import { loadLiveGroupMerge } from './core/live-groups';
@@ -695,6 +696,16 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
       rules: curationRules,
       requireSegment,
     });
+    // 编排会把 CCTV5高清 这类名字并进 CCTV5，可能在合并阶段之后又把同一路流带回来，
+    // 所以定稿后再做一次跨频道裁决（CCTV5 / CCTV5+ 的归属以最终频道为准）。
+    const finalConflicts = resolveCrossChannelConflicts(curated.groups);
+    if (finalConflicts.length > 0) {
+      logger.infoFields('aggregation', 'cross-channel-conflicts', { removed: finalConflicts.length });
+      for (const c of finalConflicts.slice(0, 3)) {
+        logger.info('aggregation', `  ${c.url} -> ${c.to} (removed from ${c.from})`);
+      }
+    }
+
     merged.lives = curated.groups as never;
     logger.infoFields('aggregation', 'channel-curated', {
       mergedDupes: curated.mergedDupes, disabled: curated.disabled, rescued: curated.rescued,
