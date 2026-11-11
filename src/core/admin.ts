@@ -528,6 +528,7 @@ ${sharedStyles}
       <div class="section-title">编排规则（改顺序不用发版）</div>
       <div style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:8px">
         一行一个台名，顺序即电视上的顺序。保存后<b>下一次聚合</b>生效；重启不丢。
+        付费台与海外台默认删除，<b>CCTV5+ 例外保留</b>；想恢复某个台，从对应名单里删掉即可。
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
         <div>
@@ -546,6 +547,25 @@ ${sharedStyles}
           <div style="font-size:0.78rem;margin-bottom:4px">省份先后</div>
           <textarea id="ruleProvince" class="import-textarea" style="min-height:100px;font-size:0.72rem"></textarea>
         </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px">
+        <div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:0.8rem;margin-bottom:4px">
+            <input type="checkbox" id="excludePaid"><span>删除付费频道</span>
+          </label>
+          <textarea id="rulePaid" class="import-textarea" style="min-height:84px;font-size:0.72rem" placeholder="一行一个付费频道名"></textarea>
+        </div>
+        <div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:0.8rem;margin-bottom:4px">
+            <input type="checkbox" id="excludeOverseas"><span>删除海外频道</span>
+          </label>
+          <textarea id="ruleOverseasGroups" class="import-textarea" style="min-height:52px;font-size:0.72rem" placeholder="整组删除的分组，一行一个"></textarea>
+          <textarea id="ruleOverseasKeywords" class="import-textarea" style="min-height:52px;font-size:0.72rem;margin-top:4px" placeholder="名称包含即删除，一行一个"></textarea>
+        </div>
+      </div>
+      <div style="margin-top:6px">
+        <div style="font-size:0.78rem;margin-bottom:4px">例外保留（优先于上面的删除）</div>
+        <textarea id="ruleKeep" class="import-textarea" style="min-height:44px;font-size:0.72rem" placeholder="一行一个，例如 CCTV5+"></textarea>
       </div>
       <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px;font-size:0.8rem">
         <label>每台保留 <input id="ruleFocusSources" type="number" min="1" max="20" style="width:56px;padding:3px 5px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary)"> 条</label>
@@ -3549,6 +3569,12 @@ function fillCurationRules(r) {
   $('ruleSat').value = (r.satOrder || []).join('\\n');
   $('ruleNj').value = (r.nanjingOrder || []).join('\\n');
   $('ruleProvince').value = (r.provinceOrder || []).join('\\n');
+  $('excludePaid').checked = r.excludePaid !== false;
+  $('excludeOverseas').checked = r.excludeOverseas !== false;
+  $('rulePaid').value = (r.paidChannels || []).join('\\n');
+  $('ruleOverseasGroups').value = (r.overseasGroups || []).join('\\n');
+  $('ruleOverseasKeywords').value = (r.overseasKeywords || []).join('\\n');
+  $('ruleKeep').value = (r.keepChannels || []).join('\\n');
   $('ruleFocusSources').value = r.focusSources || 8;
   var q = r.quotas || {};
   $('quotaCctv').value = q.cctv == null ? 6 : q.cctv;
@@ -3571,7 +3597,13 @@ async function saveCurationRules() {
       cctv: Number($('quotaCctv').value) || 0,
       satellite: Number($('quotaSatellite').value) || 0,
       local: Number($('quotaLocal').value) || 0
-    }
+    },
+    excludePaid: $('excludePaid').checked,
+    excludeOverseas: $('excludeOverseas').checked,
+    paidChannels: readLines('rulePaid'),
+    overseasGroups: readLines('ruleOverseasGroups'),
+    overseasKeywords: readLines('ruleOverseasKeywords'),
+    keepChannels: readLines('ruleKeep')
   };
   try {
     var res = await auth.authFetch('/admin/curation-rules', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });

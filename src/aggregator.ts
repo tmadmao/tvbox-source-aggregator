@@ -14,7 +14,7 @@ import { reverifyHeadSources } from './core/live-verify';
 import { withProbeNet } from './core/probe-net';
 import { trimGroupsToTopN } from './core/live-url';
 import { loadChannelOrder, applyChannelOrder } from './core/live-order';
-import { loadOverrides, curateGroups, isFocusChannel, loadCurationRules } from './core/channel-curation';
+import { loadOverrides, curateGroups, isFocusChannel, loadCurationRules, applyChannelExclusions } from './core/channel-curation';
 import { runQualityGuarantee, buildCoverageReport, type GuaranteeStats } from './core/source-guarantee';
 import { loadRegistry, saveRegistry, upsertFromGroups } from './core/channel-registry';
 import { loadLiveGroupMerge } from './core/live-groups';
@@ -409,6 +409,12 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
     logger.info('aggregation', 'Step 6.2: Similar-name dedup disabled, skipping');
   }
 
+  // 编排规则外置到 KV：台序、每台保留条数、各档保底条数、付费/海外排除名单都在这里。
+  // 读一次，后面的合并过滤、黑名单豁免、质量保障、编排共用同一份。
+  const curationRules = await loadCurationRules(storage);
+  const requireSegment = (await storage.get('channel_probe_segment')) !== 'false';
+  let qualityStats: GuaranteeStats | null = null;
+
   // Step 6.5: 直播源频道级合并（方案 D+）
   // 收集所有 m3u/txt URL（配置源合来的 FongMi 格式 lives + admin 手动源）
   // → 下载 → 解析 → 按频道名合并 urls → 输出 TVBoxLiveGroup[]
@@ -511,7 +517,8 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
         const prevTree = await storage.get(KV_CHANNEL_MERGED_TREE);
         if (prevTree) {
           try {
-            merged.lives = JSON.parse(prevTree);
+            const prev = applyChannelExclusions(JSON.parse(prevTree), curationRules);
+            merged.lives = prev.groups;
             logger.warn('aggregation', 'Step 6.5: live merge produced 0 groups, reusing previous tree');
           } catch {
             merged.lives = [];
@@ -520,10 +527,18 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
           merged.lives = [];
         }
       } else {
-        merged.lives = mergeResult.groups;
+        // 付费台 / 海外台在这里就摘掉：下一轮测速不再为它们浪费请求，
+        // 频道目录与缺口报表也不会再出现这些台。
+        const kept = applyChannelExclusions(mergeResult.groups, curationRules);
+        merged.lives = kept.groups;
+        if (kept.removedChannels > 0) {
+          logger.infoFields('aggregation', 'excluded-channels', {
+            channels: kept.removedChannels, groups: kept.removedGroups,
+          });
+        }
 
-        // 保存合并树供 channel-probe 使用
-        await storage.put(KV_CHANNEL_MERGED_TREE, JSON.stringify(mergeResult.groups));
+        // 保存合并树供 channel-probe 使用（存过滤后的树）
+        await storage.put(KV_CHANNEL_MERGED_TREE, JSON.stringify(kept.groups));
       }
 
       logger.infoFields('aggregation', 'live-merge-done', {
@@ -537,10 +552,6 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
 
   // 编排规则外置到 KV：台序、每台保留条数、各档保底可播条数都在这里。
   // 读一次，后面的黑名单豁免、质量保障、编排共用同一份，避免三处各自读盘。
-  const curationRules = await loadCurationRules(storage);
-  const requireSegment = (await storage.get('channel_probe_segment')) !== 'false';
-  let qualityStats: GuaranteeStats | null = null;
-
   // Step 6.6: 死源黑名单过滤（管理后台「清理死源」按钮写入）
   // 只过滤输出，不影响测速：测速仍按完整频道树跑，源恢复后会自动移出黑名单
   if (Array.isArray(merged.lives) && merged.lives.length > 0) {

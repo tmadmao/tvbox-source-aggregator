@@ -39,6 +39,18 @@ export interface CurationRules {
   focusSources: number;
   /** 各档「保底可播源数」 */
   quotas: TierQuotaMap;
+  /** 删除付费频道（默认开） */
+  excludePaid: boolean;
+  /** 删除海外频道（默认开：整组 + 关键词） */
+  excludeOverseas: boolean;
+  /** 付费频道名单（一行一个，按名称精确匹配） */
+  paidChannels: string[];
+  /** 海外分组名（整个分组删除） */
+  overseasGroups: string[];
+  /** 海外关键词（名称包含即删除，如 美洲 / 欧洲 / CGTN） */
+  overseasKeywords: string[];
+  /** 例外保留（优先级最高，如 CCTV5+） */
+  keepChannels: string[];
 }
 
 /**
@@ -93,6 +105,26 @@ const PROVINCE_ORDER = [
   '青海', '宁夏', '新疆', '西藏', '海南',
 ];
 
+/**
+ * 付费频道：都是需要单独订购的数字付费频道，实际没人看，还占着央视组的位置。
+ * 用户 2026-11-11 明确要求删除；CCTV5+ 不在名单里（免费的体育赛事频道）。
+ */
+const PAID_CHANNELS = [
+  '央视文体精品', '央视放映室', 'CCTV放映室', '兵器科技', '第一剧场', '电视指南',
+  '发现之旅', '风云剧场', '风云音乐', '风云足球', '高尔夫网球', '怀旧剧场',
+  '老故事', '女性时尚', '世界地理', '卫生健康', '文化精品', '央视高网',
+  '央视台球', '中学生', 'CCTV★移动传媒', 'CCTV+', 'CCTV+1', 'CCTV+2',
+];
+
+/** 海外分组：整组删除（含港澳台、日韩、国际新闻） */
+const OVERSEAS_GROUPS = ['港澳台', '台湾', '韩国', '日本', '国际新闻', '其他海外'];
+
+/** 海外关键词：央视海外版、CGTN、英文新闻 */
+const OVERSEAS_KEYWORDS = ['CGTN', 'CCTV-NEWS', '美洲', '欧洲', '港澳版'];
+
+/** 例外保留：唯一被点名的「可看」频道 */
+const KEEP_CHANNELS = ['CCTV5+'];
+
 export const DEFAULT_CURATION_RULES: CurationRules = {
   cctvOrder: CCTV_ORDER,
   satOrder: SAT_ORDER,
@@ -100,6 +132,12 @@ export const DEFAULT_CURATION_RULES: CurationRules = {
   provinceOrder: PROVINCE_ORDER,
   focusSources: 8,
   quotas: { ...DEFAULT_TIER_QUOTA },
+  excludePaid: true,
+  excludeOverseas: true,
+  paidChannels: PAID_CHANNELS,
+  overseasGroups: OVERSEAS_GROUPS,
+  overseasKeywords: OVERSEAS_KEYWORDS,
+  keepChannels: KEEP_CHANNELS,
 };
 
 /**
@@ -213,6 +251,12 @@ function cloneRules(r: CurationRules): CurationRules {
     provinceOrder: [...r.provinceOrder],
     focusSources: r.focusSources,
     quotas: { ...r.quotas },
+    excludePaid: r.excludePaid,
+    excludeOverseas: r.excludeOverseas,
+    paidChannels: [...r.paidChannels],
+    overseasGroups: [...r.overseasGroups],
+    overseasKeywords: [...r.overseasKeywords],
+    keepChannels: [...r.keepChannels],
   };
 }
 
@@ -231,10 +275,26 @@ export function normalizeRules(input: unknown): CurationRules {
     return list.length > 0 ? list : fallback;
   };
 
+  // 排除名单允许「清空」：用户可能就是想把所有台都放回来
+  const pickList = (v: unknown, fallback: string[]): string[] => {
+    if (!Array.isArray(v)) return [...fallback];
+    return v
+      .map((x) => String(x || '').trim())
+      .filter(Boolean)
+      .filter((x, i, arr) => arr.indexOf(x) === i);
+  };
+
   base.cctvOrder = pick(o.cctvOrder, base.cctvOrder);
   base.satOrder = pick(o.satOrder, base.satOrder);
   base.nanjingOrder = pick(o.nanjingOrder, base.nanjingOrder);
   base.provinceOrder = pick(o.provinceOrder, base.provinceOrder);
+
+  base.excludePaid = o.excludePaid !== false;
+  base.excludeOverseas = o.excludeOverseas !== false;
+  base.paidChannels = pickList(o.paidChannels, base.paidChannels);
+  base.overseasGroups = pickList(o.overseasGroups, base.overseasGroups);
+  base.overseasKeywords = pickList(o.overseasKeywords, base.overseasKeywords);
+  base.keepChannels = pickList(o.keepChannels, base.keepChannels);
 
   const fs = Number(o.focusSources);
   base.focusSources = Number.isFinite(fs) ? Math.max(1, Math.min(20, Math.floor(fs))) : base.focusSources;
@@ -497,6 +557,76 @@ export async function saveOverrides(storage: Storage, map: OverrideMap): Promise
   await storage.put(KV_LIVE_CHANNEL_OVERRIDES, JSON.stringify(map || {}));
 }
 
+// ─── 排除规则（付费 / 海外） ──────────────────────────
+
+/**
+ * 是否删除这个频道。
+ *
+ * 优先级：例外保留 > 海外分组 > 付费名单 > 海外关键词。
+ * 用户 2026-11-11 的原话是「付费台和海外台删掉，唯一可看的是 CCTV5+」，
+ * 所以默认删干净，但保留名单里放 CCTV5+；名单都在后台可改。
+ */
+export function isExcludedChannel(group: string, name: string, rules: CurationRules): boolean {
+  const k = key(name);
+  if (rules.keepChannels.some((x) => key(x) === k)) return false;
+
+  if (rules.excludeOverseas && rules.overseasGroups.some((g) => key(g) === key(group))) return true;
+
+  if (rules.excludePaid && rules.paidChannels.some((p) => key(p) === k)) return true;
+
+  if (rules.excludeOverseas) {
+    const s = cleanLiveName(name).toUpperCase();
+    if (rules.overseasKeywords.some((kw) => kw && s.includes(kw.toUpperCase()))) return true;
+  }
+  return false;
+}
+
+export interface ExclusionResult {
+  groups: TVBoxLiveGroup[];
+  removedChannels: number;
+  removedGroups: number;
+}
+
+/**
+ * 在「合并之后、测速/输出之前」把付费台和海外台整组摘掉。
+ *
+ * 放在合并后而不是输出前，是为了让下一轮测速不再为这些台浪费请求
+ * （测速用的是上一轮落盘的频道树）。
+ */
+export function applyChannelExclusions(
+  groups: TVBoxLiveGroup[],
+  rules: CurationRules,
+): ExclusionResult {
+  let removedChannels = 0;
+  let removedGroups = 0;
+  const out: TVBoxLiveGroup[] = [];
+
+  for (const g of groups) {
+    const inOverseasGroup = rules.excludeOverseas
+      && rules.overseasGroups.some((x) => key(x) === key(g.group || ''));
+
+    if (inOverseasGroup) {
+      removedGroups++;
+      removedChannels += (g.channels || []).length;
+      continue;
+    }
+
+    const channels: TVBoxLiveChannel[] = [];
+    for (const ch of g.channels || []) {
+      if (isExcludedChannel(g.group || '', ch.name, rules)) {
+        removedChannels++;
+        continue;
+      }
+      channels.push(ch);
+    }
+
+    if (channels.length > 0) out.push({ ...g, channels });
+    else if ((g.channels || []).length > 0) removedGroups++;
+  }
+
+  return { groups: out, removedChannels, removedGroups };
+}
+
 // ─── 主入口 ────────────────────────────────────────────
 
 export interface CurateResult {
@@ -506,6 +636,8 @@ export interface CurateResult {
   disabled: number;
   movedOut: string[];  // 从央视挪到「其他」的伪频道（CCTV9576 这类乱命名）
   rescued: number;     // 从错误分组里捞回重点分组的频道数
+  excluded: number;    // 按规则删除的付费 / 海外频道数
+  excludedGroups: number;
 }
 
 /** 判断「挂着 CCTV 名头但其实不是央视」：CCTV9576 / CCTV杀人案件(韩国恐怖片) */
@@ -552,6 +684,10 @@ export function curateGroups(
 ): CurateResult {
   const C = opts.rules ? compileRules(normalizeRules(opts.rules)) : DEFAULT_COMPILED;
   const requireSegment = opts.requireSegment !== false;
+
+  // 付费台 / 海外台先摘掉（老 KV 树里可能还有，不能只依赖合并阶段过滤）
+  const excluded = applyChannelExclusions(groups, C.rules);
+  groups = excluded.groups;
 
   let renamed = 0;
   let mergedDupes = 0;
@@ -652,7 +788,16 @@ export function curateGroups(
     }
   }
 
-  return { groups: out, renamed, mergedDupes, disabled, movedOut: movedOut.map((c) => c.name), rescued };
+  return {
+    groups: out,
+    renamed,
+    mergedDupes,
+    disabled,
+    movedOut: movedOut.map((c) => c.name),
+    rescued,
+    excluded: excluded.removedChannels,
+    excludedGroups: excluded.removedGroups,
+  };
 }
 
 /** 频道当前是否被置顶/禁用（后台展示用） */

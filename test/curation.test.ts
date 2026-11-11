@@ -7,6 +7,8 @@ import {
   isPriorityLocal,
   curateGroups,
   buildUrlTierMap,
+  isExcludedChannel,
+  applyChannelExclusions,
   DEFAULT_CURATION_RULES,
 } from '../src/core/channel-curation';
 import type { ChannelSpeedEntry, ChannelSpeedMap, TVBoxLiveGroup } from '../src/core/types';
@@ -133,6 +135,54 @@ test('curateGroups：置顶与禁用仍然生效', () => {
   }, speedMap);
   const sat = res.groups.find((g) => g.group === '卫视')!;
   assert.deepEqual(sat.channels.map((c) => c.name), ['浙江卫视', '湖南卫视']);
+});
+
+test('isExcludedChannel：付费台与海外台删除，CCTV5+ 例外保留', () => {
+  const r = DEFAULT_CURATION_RULES;
+  assert.equal(isExcludedChannel('央视', 'CCTV5+', r), false);
+  assert.equal(isExcludedChannel('央视', 'CCTV1', r), false);
+  assert.equal(isExcludedChannel('央视', '兵器科技', r), true);
+  assert.equal(isExcludedChannel('央视', 'CCTV4美洲', r), true);
+  assert.equal(isExcludedChannel('央视', 'CGTN纪录', r), true);
+  assert.equal(isExcludedChannel('港澳台', '翡翠台', r), true);
+  assert.equal(isExcludedChannel('其他海外', 'HBO', r), true);
+  assert.equal(isExcludedChannel('境内专题', 'CHC动作电影', r), false);
+});
+
+test('applyChannelExclusions：整组海外台直接摘掉，付费台按名单删', () => {
+  const groups: TVBoxLiveGroup[] = [
+    {
+      group: '央视',
+      channels: [
+        { name: 'CCTV1', urls: ['http://a/1$x'] },
+        { name: 'CCTV5+', urls: ['http://a/2$x'] },
+        { name: '兵器科技', urls: ['http://a/3$x'] },
+      ],
+    },
+    { group: '港澳台', channels: [{ name: '翡翠台', urls: ['http://b/1$x'] }] },
+    { group: '其他海外', channels: [{ name: 'HBO', urls: ['http://c/1$x'] }] },
+  ];
+  const res = applyChannelExclusions(groups, DEFAULT_CURATION_RULES);
+  assert.equal(res.groups.length, 1);
+  assert.deepEqual(res.groups[0].channels.map((c) => c.name), ['CCTV1', 'CCTV5+']);
+  assert.equal(res.removedChannels, 3);
+  assert.equal(res.removedGroups, 2);
+});
+
+test('curateGroups：排除规则在编排阶段再兜一层（老 KV 树也能清干净）', () => {
+  const speedMap: ChannelSpeedMap = {};
+  const groups: TVBoxLiveGroup[] = [
+    { group: '央视', channels: [
+      { name: 'CCTV1', urls: ['http://a/1$x'] },
+      { name: '风云剧场', urls: ['http://a/2$x'] },
+    ] },
+    { group: '国际新闻', channels: [{ name: 'BBC', urls: ['http://b/1$x'] }] },
+  ];
+  for (const u of ['http://a/1', 'http://a/2', 'http://b/1']) speedMap[u] = okEntry();
+  const res = curateGroups(groups, {}, speedMap);
+  assert.equal(res.excluded, 2);
+  assert.deepEqual(res.groups.map((g) => g.group), ['央视']);
+  assert.deepEqual(res.groups[0].channels.map((c) => c.name), ['CCTV1']);
 });
 
 test('buildUrlTierMap：同一 URL 取最高档位', () => {
