@@ -147,6 +147,8 @@ test('isExcludedChannel：付费台与海外台删除，CCTV5+ 例外保留', ()
   assert.equal(isExcludedChannel('央视', 'CCTV4K', r), true);
   assert.equal(isExcludedChannel('央视', 'CCTV8K', r), true);
   assert.equal(isExcludedChannel('央视', 'CCTV16-4K', r), true);
+  assert.equal(isExcludedChannel('纪录科教', 'Love Nature 4K', r), true);
+  assert.equal(isExcludedChannel('其他', '4K超清', r), true);
   assert.equal(isExcludedChannel('央视', 'CCTV4 AMERICA', r), true);
   assert.equal(isExcludedChannel('央视', 'CCTV央视文体精品', r), true);
   assert.equal(isExcludedChannel('央视', 'CGTN纪录', r), true);

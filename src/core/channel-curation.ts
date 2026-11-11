@@ -49,6 +49,8 @@ export interface CurationRules {
   overseasGroups: string[];
   /** 海外关键词（名称包含即删除，如 美洲 / 欧洲 / CGTN） */
   overseasKeywords: string[];
+  /** 无用画质频道关键词（默认 4K/8K：带宽高、源少，用户明确说没必要） */
+  nicheKeywords: string[];
   /** 例外保留（优先级最高，如 CCTV5+） */
   keepChannels: string[];
 }
@@ -124,6 +126,9 @@ const OVERSEAS_GROUPS = ['港澳台', '台湾', '韩国', '日本', '国际新�
 /** 海外关键词：央视海外版、CGTN、英文新闻 */
 const OVERSEAS_KEYWORDS = ['CGTN', 'CCTV-NEWS', '美洲', '欧洲', '港澳版'];
 
+/** 无用画质频道：4K/8K 一律不要（含 Love Nature 4K / 4K超清 这类） */
+const NICHE_KEYWORDS = ['4K', '8K'];
+
 /** 例外保留：唯一被点名的「可看」频道 */
 const KEEP_CHANNELS = ['CCTV5+'];
 
@@ -139,6 +144,7 @@ export const DEFAULT_CURATION_RULES: CurationRules = {
   paidChannels: PAID_CHANNELS,
   overseasGroups: OVERSEAS_GROUPS,
   overseasKeywords: OVERSEAS_KEYWORDS,
+  nicheKeywords: NICHE_KEYWORDS,
   keepChannels: KEEP_CHANNELS,
 };
 
@@ -258,6 +264,7 @@ function cloneRules(r: CurationRules): CurationRules {
     paidChannels: [...r.paidChannels],
     overseasGroups: [...r.overseasGroups],
     overseasKeywords: [...r.overseasKeywords],
+    nicheKeywords: [...r.nicheKeywords],
     keepChannels: [...r.keepChannels],
   };
 }
@@ -296,6 +303,7 @@ export function normalizeRules(input: unknown): CurationRules {
   base.paidChannels = pickList(o.paidChannels, base.paidChannels);
   base.overseasGroups = pickList(o.overseasGroups, base.overseasGroups);
   base.overseasKeywords = pickList(o.overseasKeywords, base.overseasKeywords);
+  base.nicheKeywords = pickList(o.nicheKeywords, base.nicheKeywords);
   base.keepChannels = pickList(o.keepChannels, base.keepChannels);
 
   const fs = Number(o.focusSources);
@@ -593,7 +601,11 @@ export function isExcludedChannel(group: string, name: string, rules: CurationRu
 
   if (rules.excludeOverseas && rules.overseasGroups.some((g) => key(g) === key(group))) return true;
 
-  if (rules.excludePaid && rules.paidChannels.some((p) => keys.includes(key(p)))) return true;
+  if (rules.excludePaid) {
+    if (rules.paidChannels.some((p) => keys.includes(key(p)))) return true;
+    const upper = names.map((n) => n.toUpperCase());
+    if (rules.nicheKeywords.some((kw) => kw && upper.some((s) => s.includes(kw.toUpperCase())))) return true;
+  }
 
   if (rules.excludeOverseas) {
     const upper = names.map((n) => n.toUpperCase());

@@ -563,6 +563,7 @@ ${sharedStyles}
             <input type="checkbox" id="excludePaid"><span>删除付费频道</span>
           </label>
           <textarea id="rulePaid" class="import-textarea" style="min-height:84px;font-size:0.72rem" placeholder="一行一个付费频道名"></textarea>
+          <textarea id="ruleNiche" class="import-textarea" style="min-height:40px;font-size:0.72rem;margin-top:4px" placeholder="无用画质关键词，如 4K / 8K"></textarea>
         </div>
         <div>
           <label style="display:flex;align-items:center;gap:6px;font-size:0.8rem;margin-bottom:4px">
@@ -3627,6 +3628,7 @@ function fillCurationRules(r) {
   $('excludePaid').checked = r.excludePaid !== false;
   $('excludeOverseas').checked = r.excludeOverseas !== false;
   $('rulePaid').value = (r.paidChannels || []).join('\\n');
+  $('ruleNiche').value = (r.nicheKeywords || []).join('\\n');
   $('ruleOverseasGroups').value = (r.overseasGroups || []).join('\\n');
   $('ruleOverseasKeywords').value = (r.overseasKeywords || []).join('\\n');
   $('ruleKeep').value = (r.keepChannels || []).join('\\n');
@@ -3656,6 +3658,7 @@ async function saveCurationRules() {
     excludePaid: $('excludePaid').checked,
     excludeOverseas: $('excludeOverseas').checked,
     paidChannels: readLines('rulePaid'),
+    nicheKeywords: readLines('ruleNiche'),
     overseasGroups: readLines('ruleOverseasGroups'),
     overseasKeywords: readLines('ruleOverseasKeywords'),
     keepChannels: readLines('ruleKeep')
