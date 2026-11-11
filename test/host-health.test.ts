@@ -46,6 +46,25 @@ test('applyHostOutcomes：抽样全失败先记可疑，满 30 天才判死', ()
   assert.equal(rows.get('a')!.state, 2);
 });
 
+test('applyHostOutcomes：已有域名再次全失败时也必须落盘（P0-2）', () => {
+  const rows = new Map<string, HostRow>();
+  applyHostOutcomes(rows, [{ host: 'a', probed: 3, ok: 0 }], now);
+  const since = rows.get('a')!.since;
+
+  // 第二轮：同域名抽样 3 条全失败，状态没变（仍是可疑）
+  const later = now + 1000;
+  const r = applyHostOutcomes(rows, [{ host: 'a', probed: 3, ok: 0 }], later);
+  assert.equal(r.revived, 0);
+  assert.equal(r.marked, 0);
+  assert.equal(r.condemned, 0);
+  // 计数全 0，但 touched 必须 >0 —— 否则调用方不会落盘，probedAt 白改
+  assert.equal(r.touched, 1);
+  assert.equal(rows.get('a')!.probedAt, later);
+  assert.equal(rows.get('a')!.since, since);
+  // 复验周期从这次重新计时：本轮配额归 0，不再每轮重抽
+  assert.equal(hostSampleQuota(rows.get('a'), later), 0);
+});
+
 test('applyHostOutcomes：任一条通即撤销域名结论', () => {
   const rows = new Map<string, HostRow>([
     ['a', { host: 'a', state: 2, since: now, probedAt: now, urls: 100, ok: 0 }],

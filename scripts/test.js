@@ -40,6 +40,9 @@ build({
   outExtension: { '.js': '.mjs' },
   sourcemap: false,
   logLevel: 'warning',
+  // undici 是 CJS：打进 ESM 产物后它内部的 require('assert') 会变成
+  // "Dynamic require is not supported" 直接抛错。保持外部依赖，交给 Node 原生互操作。
+  external: ['undici'],
 }).then(() => {
   const files = fs.readdirSync(outDir)
     .filter((f) => f.endsWith('.test.mjs'))

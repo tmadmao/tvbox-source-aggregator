@@ -74,6 +74,19 @@ test('condemnExpired：死满 30 天才转判死，且不删除', async () => {
   assert.equal(after.find((x) => x.url === 'http://new/2')!.state, 1);
 });
 
+test('condemnExpired：未知年龄的 since 回填必须落盘（P2-9）', async () => {
+  const s = new MemStorage();
+  const now = 1_700_000_000_000;
+  // 老账本没有 since，本轮也没有任何条目被判死
+  await saveDeadRows(s, [{ url: 'http://unknown/1', state: 1, since: 0, probedAt: 0 }]);
+  const r = await condemnExpired(s, () => true, now);
+  assert.equal(r.promoted, 0);
+  assert.equal(r.backfilled, 1);
+  const after = await loadDeadRows(s);
+  // 不落盘的话这里是 0，判死时钟永远不启动
+  assert.equal(after[0].since, now);
+});
+
 test('condemnExpired：已经复活的不判死', async () => {
   const s = new MemStorage();
   const now = 1_700_000_000_000;

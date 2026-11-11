@@ -54,7 +54,7 @@ test('closeStaleRunning：进程被杀留下的 running 自动收尾', () => {
   assert.equal(closed[1].status, 'running');   // 还在合理执行时间内
 });
 
-test('summarizeRuns：超过 26 小时没成功 = 漏跑，并统计连续失败', () => {
+test('summarizeRuns：超过判据没成功 = 漏跑，并统计连续失败', () => {
   const now = Date.parse('2026-11-11T12:00:00+08:00');
   const runs = [
     run('2026-11-10T05:00:00+08:00', 'success'),
@@ -100,8 +100,16 @@ test('summarizeRuns：守夜成功不能掩盖「聚合没跑」', () => {
   assert.equal(s.today.failed, 1);
 });
 
-test('RUN_STALE_MS 是 26 小时', () => {
-  assert.equal(RUN_STALE_MS, 26 * 3600 * 1000);
+test('RUN_STALE_MS 是 25 小时：当天 05:00 没跑，06:30 自检就该判出来', () => {
+  // 26 小时会让「昨天 5 点没跑」在 06:30 时差 30 分钟判不出来，要等第二天 —— 即单日漏跑静默
+  assert.equal(RUN_STALE_MS, 25 * 3600 * 1000);
+
+  const lastOk = Date.parse('2026-11-10T05:00:00+08:00');
+  const checkAt = Date.parse('2026-11-11T06:30:00+08:00');
+  const runs = [run('2026-11-10T05:00:00+08:00', 'success')];
+  const s = summarizeRuns(runs, checkAt, 'Asia/Shanghai');
+  assert.equal(s.stale, true);
+  assert.equal((checkAt - lastOk) / 3600000, 25.5);   // 06:30 时距上次成功 25.5h
 });
 
 test('beginRun / finishRun：写入、收尾、保留产出统计', async () => {
