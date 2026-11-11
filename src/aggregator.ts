@@ -716,7 +716,7 @@ async function _runAggregation(storage: Storage, config: AppConfig, startTime: n
     // 数字才和电视上真正看到的频道对得上（保障阶段那会儿 CCTV1 还有 3 种写法）。
     try {
       const finalReport = buildCoverageReport(
-        merged.lives as TVBoxLiveGroup[], curateSpeedMap, curationRules, requireSegment,
+        curated.groups, curateSpeedMap, curationRules, requireSegment,
       );
       await storage.put(KV_LIVE_QUALITY_GAP, JSON.stringify({
         at: new Date().toISOString(),

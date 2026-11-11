@@ -8,6 +8,10 @@ ENV APP_COMMIT=${APP_COMMIT}
 
 RUN apk add --no-cache python3 make g++
 
+# 官方 node 镜像自带头文件；显式指定可让 node-gyp 不再联网下载 node headers
+# （NAS 到 nodejs.org 时通时不通，之前就卡在这一步）
+ENV npm_config_nodedir=/usr/local
+
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --ignore-scripts --registry https://registry.npmmirror.com && \
@@ -26,6 +30,9 @@ ENV APP_VERSION=${APP_VERSION}
 ENV APP_COMMIT=${APP_COMMIT}
 
 RUN apk add --no-cache python3 make g++ tzdata
+
+# 同上：原生模块 rebuild 用镜像自带的 node headers，不依赖外网
+ENV npm_config_nodedir=/usr/local
 
 WORKDIR /app
 COPY package*.json ./
