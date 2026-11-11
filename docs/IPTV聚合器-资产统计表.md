@@ -45,7 +45,7 @@
 | `core/alerts.ts` | 226 | 失败/超时/漏跑告警（Webhook / Telegram）、6 小时去重、通知文案 |
 | `routes/scheduler-admin.ts` | 99 | 执行历史、告警配置与测试、质量缺口报表、质量保障开关 |
 | `routes/curation-admin.ts` | 63 | 编排规则读取/保存/恢复默认 |
-| `test/*.test.ts` + `scripts/test.js` | 616 | 42 个单测（tier / curation / ledger / host-health / run-history），esbuild + node:test，无新依赖 |
+| `test/*.test.ts` + `scripts/test.js` | 616 | 44 个单测（tier / curation / ledger / host-health / run-history），esbuild + node:test，无新依赖 |
 
 `channel-curation.ts` 从 518 → 718 行：台序改由 KV 驱动、合并后接质量编排。
 

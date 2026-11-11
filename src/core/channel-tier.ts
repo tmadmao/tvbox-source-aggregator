@@ -195,8 +195,10 @@ export function arrangeSources(
     });
   });
 
-  const droppedDead = items.filter((x) => x.quality.grade === 3).length;
-  const alive = items.filter((x) => x.quality.grade !== 3).sort(compareQuality);
+  // 输出里不放任何「探测失败」的条目：哪怕只失败一次，对客户端也是一次 5 秒超时。
+  // 「单次失败留观」只用于候选排序与缺口统计，不用于最终输出。
+  const droppedDead = items.filter((x) => x.entry?.kind === 'fail' || x.quality.grade === 3).length;
+  const alive = items.filter((x) => x.entry?.kind !== 'fail').sort(compareQuality);
   const verifiedItems = alive.filter((x) => x.quality.verified);
 
   // 第一轮：可播 + 同域名只取一条

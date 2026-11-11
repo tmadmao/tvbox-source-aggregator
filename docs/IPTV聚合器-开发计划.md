@@ -109,7 +109,7 @@
 | 14 | 数据库备份 | 应用内 cron `30 5 * * *`，SQLite 在线备份，保留 7 份 |
 | 13 | 分级源质量保障（原「单源频道补源」） | `GET /admin/quality-gap`：央视 26/44、卫视 35/43 有 ≥4 条可播源；央视/卫视输出 **0 条死链**；缺口表只列重点台 |
 | 15 | 调度执行历史与告警 | `GET /admin/run-history`：本次记录 `success / 243s / 769 频道 / 1863 源`；逐日 ✓/✕；`alert_config` 支持 Webhook / Telegram，06:30 漏跑自检 |
-| 16 | 自动化测试 | `npm test` → **42 个用例全过**（channel-tier / curation / ledger / host-health / run-history） |
+| 16 | 自动化测试 | `npm test` → **44 个用例全过**（channel-tier / curation / ledger / host-health / run-history） |
 | 17 | 编排规则外置 | `GET/PUT/DELETE /admin/curation-rules`；改卫视顺序 → 下一次聚合生效，重启仍保留 |
 | 18 | 镜像防回退 | 镜像 `tvbox-aggregator:d2f77ba`，容器只挂 `data`；重建后 `/version` 仍为 `d2f77ba` |
 

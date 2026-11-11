@@ -512,6 +512,7 @@ ${sharedStyles}
       <div style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:8px">
         「保量」不再是每台 8 条，而是每台 N 条<b>本轮实测能播、延迟低于 5 秒超时、不同域名</b>的源。
         死链不再占位置；前排不够时从完整源池继续补测，补不到的进下面的缺口表。
+        达标率按频道目录统计（包含因全死被隐藏的台）；缺口表只列央视/卫视与有 2 条以上候选的地方台。
       </div>
       <div id="qualitySummary" style="display:flex;gap:18px;flex-wrap:wrap;font-size:0.82rem;margin-bottom:8px"></div>
       <label style="display:flex;align-items:center;gap:8px;font-size:0.82rem;margin-bottom:8px">

@@ -90,6 +90,17 @@ test('arrangeSources：死链直接从输出里剔除', () => {
   assert.equal(r.verified, 1);
 });
 
+test('arrangeSources：单次失败的源也不进输出（客户端只认 5 秒超时）', () => {
+  const good = 'http://a/1$x';
+  const once = 'http://b/2$x';
+  const m = mapOf(ok('http://a/1', 800), ['http://b/2', {
+    speedMs: 0, probedAt: new Date().toISOString(), kind: 'fail', fails: 1,
+  }]);
+  const r = arrangeSources([good, once], m, { quota: 2, cap: 8 });
+  assert.deepEqual(r.urls, [good]);
+  assert.equal(r.droppedDead, 1);
+});
+
 test('arrangeSources：前排优先不同域名', () => {
   const m = mapOf(ok('http://a/1', 500), ok('http://a/2', 600), ok('http://b/3', 1500));
   const r = arrangeSources(
