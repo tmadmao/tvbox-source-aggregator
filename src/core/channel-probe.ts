@@ -149,6 +149,35 @@ async function readTextUpTo(
   return new TextDecoder().decode(buf.subarray(0, off));
 }
 
+/** 读二进制直到 maxBytes，返回拼接后的 buffer（用于 TS/FLV 头校验） */
+async function readBytesUpTo(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  first: Uint8Array | undefined,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  if (first && first.length > 0) {
+    chunks.push(first);
+    total += first.length;
+  }
+  while (total < maxBytes) {
+    const { value, done } = await reader.read();
+    if (done || !value) break;
+    chunks.push(value);
+    total += value.length;
+  }
+  const buf = new Uint8Array(Math.min(total, maxBytes));
+  let off = 0;
+  for (const c of chunks) {
+    if (off >= buf.length) break;
+    const slice = off + c.length > buf.length ? c.subarray(0, buf.length - off) : c;
+    buf.set(slice, off);
+    off += slice.length;
+  }
+  return buf;
+}
+
 /** 取播放列表里第一个非 # 开头的行，按 base 解析成绝对 URL */
 export function firstUri(playlist: string, base: string): string | null {
   for (const raw of playlist.split(/\r?\n/)) {
@@ -162,6 +191,21 @@ export function firstUri(playlist: string, base: string): string | null {
     }
   }
   return null;
+}
+
+/** 取播放列表里最后一个分片（直播边缘比首个分片更能代表「现在能不能播」） */
+export function lastUri(playlist: string, base: string): string | null {
+  let last: string | null = null;
+  for (const raw of playlist.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    try {
+      last = new URL(line, base).toString();
+    } catch {
+      return null;
+    }
+  }
+  return last;
 }
 
 /** 小请求取文本（用于跟进主播放列表的子列表） */
@@ -193,6 +237,11 @@ async function probeSegment(url: string): Promise<{ ok: boolean; bytes: number; 
   try {
     const resp = await netFetch(url, { signal: ctl.signal, headers: { 'User-Agent': TVBOX_UA } });
     if (!resp.ok) return { ok: false, bytes: 0, note: `分片 HTTP ${resp.status}` };
+    const ctype = (resp.headers.get('content-type') || '').toLowerCase();
+    // 200 也可能是错误页/JSON，先按类型排除，别把 HTML 当视频
+    if (/text\/html|application\/json|text\/plain/.test(ctype)) {
+      return { ok: false, bytes: 0, note: `分片类型 ${ctype.split(';')[0]}` };
+    }
     const reader = resp.body?.getReader();
     if (!reader) return { ok: false, bytes: 0, note: '分片无响应体' };
 
@@ -251,8 +300,9 @@ export async function verifyPlayable(
     base = variant;
   }
 
-  const seg = firstUri(body, base);
-  if (!seg) return { ok: true, note: '无分片' };
+  // 用最后一个分片：首个分片常被 CDN 缓存，不能代表当前直播边缘
+  const seg = lastUri(body, base);
+  if (!seg) return { ok: false, note: '无分片' };
 
   const r = await probeSegment(seg);
   return { ok: r.ok, note: r.note, segUrl: seg };
@@ -343,19 +393,43 @@ export async function probeUrlOnce(url: string, skipL2 = false): Promise<OnceRes
         return { speedMs: ttfb, kind: 'm3u8', timedOut: false, stage: 'segment', note: check.note };
       }
 
-      if (isTs) {
-        // 检查 sync byte 0x47（4KB 内任何位置）
-        const end = Math.min(4096, value.length);
-        for (let i = 0; i < end; i += 188) {
-          if (value[i] === 0x47) {
-            return { speedMs: ttfb, kind: 'ts', timedOut: false };
-          }
-        }
-        // 没找到 sync byte 也不一定失败（可能是 HTTP-FLV 等），用 tcp 标记
-        return { speedMs: ttfb, kind: 'tcp', timedOut: false };
+      const ctype = (resp.headers.get('content-type') || '').toLowerCase();
+      if (/text\/html|application\/json|text\/plain/.test(ctype)) {
+        return { speedMs: 0, kind: 'fail', timedOut: false, note: `非视频内容 ${ctype.split(';')[0]}` };
       }
 
-      return { speedMs: ttfb, kind: 'tcp', timedOut: false };
+      const binaryLike = isTs || /octet-stream|video\//.test(ctype);
+      if (!binaryLike) {
+        // 以前这里直接返回 tcp 并算「可用」，导致 migu.php 之类返回错误页也能排到前排。
+        return { speedMs: 0, kind: 'fail', timedOut: false, note: '非视频内容' };
+      }
+
+      // 读满 64KB：只读到首包就判活，会放过「开头出数据、随后卡死」的源
+      const buf = await readBytesUpTo(reader, value, CHANNEL_PROBE_SEGMENT_BYTES);
+      const elapsed = Math.max(1, Date.now() - start);
+      const kbps = Math.round((buf.length / 1024) / (elapsed / 1000));
+      if (buf.length < CHANNEL_PROBE_SEGMENT_MIN_BYTES) {
+        return { speedMs: 0, kind: 'fail', timedOut: false, stage: 'segment', note: `仅 ${buf.length}B` };
+      }
+      if (kbps < CHANNEL_PROBE_SEGMENT_MIN_KBPS) {
+        return { speedMs: 0, kind: 'fail', timedOut: false, stage: 'segment', note: `吞吐 ${kbps}KB/s` };
+      }
+
+      const end = Math.min(4096, buf.length);
+      let hasTsSync = false;
+      for (let i = 0; i < end; i += 188) {
+        if (buf[i] === 0x47) { hasTsSync = true; break; }
+      }
+      if (hasTsSync) {
+        return { speedMs: ttfb, kind: 'ts', timedOut: false, stage: 'segment' };
+      }
+      const isFlv = buf.length > 3 && buf[0] === 0x46 && buf[1] === 0x4c && buf[2] === 0x56;
+      const isMp4 = buf.length > 8
+        && buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70; // ftyp
+      if (isFlv || isMp4) {
+        return { speedMs: ttfb, kind: 'tcp', timedOut: false, stage: 'segment' };
+      }
+      return { speedMs: 0, kind: 'fail', timedOut: false, note: '无法识别容器' };
     } finally {
       clearTimeout(timer);
       reader.cancel().catch(() => {});

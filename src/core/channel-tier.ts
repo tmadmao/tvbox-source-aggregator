@@ -112,6 +112,10 @@ export function gradeOf(
     // 只拿到清单、没验分片：历史上这类源 23% 播不出来，不能算保底
     return { grade: 2, verified: false, reason: 'unverified' };
   }
+  // 非 HLS 的裸流（.php / 短链）也必须验过容器与吞吐，不能只看「首包可达」
+  if (entry.kind === 'tcp' && !segmentVerified) {
+    return { grade: 2, verified: false, reason: 'unverified' };
+  }
 
   if (entry.speedMs > QUALITY_SLOW_MS) {
     return { grade: 2, verified: false, reason: 'slow' };

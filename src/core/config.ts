@@ -154,10 +154,10 @@ export const CHANNEL_PROBE_BUDGET_MS = 20 * 60 * 1000;
 // 播放列表只是一个文本清单，由 CDN 静态返回；真正的分片可能指向另一台已失效的源站。
 // 实测：排第一的源里 23% 是「列表 200 但分片 404/超时」，光看 #EXTM3U 判不出来。
 export const CHANNEL_PROBE_SEGMENT_TIMEOUT_MS = 4000; // 分片单独计时，不吃整条 5 秒预算
-export const CHANNEL_PROBE_SEGMENT_BYTES = 8192;      // 读到 8KB 就认为「确实在出数据」
-export const CHANNEL_PROBE_SEGMENT_MIN_BYTES = 8192;  // 低于 8KB 视为无效（多为错误页/空响应）
+export const CHANNEL_PROBE_SEGMENT_BYTES = 65536;     // 读满 64KB 才算「持续出数据」
+export const CHANNEL_PROBE_SEGMENT_MIN_BYTES = 32768; // 低于 32KB 视为无效（首包后卡死/错误页）
 /** 分片持续吞吐下限（KB/s）：低于这个值意味着能开头、播不动，电视端照样卡 */
-export const CHANNEL_PROBE_SEGMENT_MIN_KBPS = 100;
+export const CHANNEL_PROBE_SEGMENT_MIN_KBPS = 200;
 // 缓存过期（6 小时）：过期即重测，保证排序不会基于一周前的数据
 export const CHANNEL_SPEED_TTL_MS = 6 * 60 * 60 * 1000; // 成功源的常规回测间隔
 /** 确认死链的回测间隔：撞一次要等满超时，没必要和好源一样勤 */
