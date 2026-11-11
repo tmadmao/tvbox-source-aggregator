@@ -10,6 +10,7 @@ import { TVBOX_UA, BROWSER_UA, CHANNEL_HOST_DIVERSIFY } from './config';
 import { splitUrlSource, bareUrl, joinUrlSource, compareBySpeed, diversifyByHost } from './live-url';
 import { normalizeGroupName, groupPriority, type LiveGroupMergeConfig } from './live-groups';
 import { isShoppingChannel, type ShoppingFilterConfig } from './live-filters';
+import { resolveCrossChannelConflicts } from './channel-conflicts';
 
 // ─── 输入条目 ──────────────────────────────────────────
 
@@ -456,6 +457,16 @@ export async function mergeLivesToNative(
     });
   }
 
+  // 跨频道重复源裁决：同一路流被标成 CCTV5 和 CCTV5+ 时，按来源票数归一边，
+  // 避免「CCTV5 里播的是 CCTV5+」。
+  const conflicts = resolveCrossChannelConflicts(groups);
+  if (conflicts.length > 0) {
+    console.log(`[live-merger] Cross-channel conflicts: removed ${conflicts.length} duplicate URLs`);
+    for (const c of conflicts.slice(0, 5)) {
+      console.log(`[live-merger]   ${c.url} -> ${c.to} (removed from ${c.from})`);
+    }
+  }
+
   // 最终安全校验（双保险第二道）：
   //   1) 先移除 "type" 字段名（若意外进入）
   //   2) 再扫描 value 内 type 子串，统一 URL-encode 替换为 %74ype
@@ -665,5 +676,7 @@ export async function fetchAndParseLiveUrls(
     }
     groups.push({ group, channels: chs });
   }
+  // 分离模式同样要做跨频道裁决（源名分组不影响同一地址被标到多个台）
+  resolveCrossChannelConflicts(groups);
   return groups;
 }
