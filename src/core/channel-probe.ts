@@ -24,7 +24,7 @@ import {
 } from './config';
 import { extractAllUrls } from './live-merger';
 import { buildUrlTierMap, TIER_RANK } from './channel-curation';
-import { netFetch } from './probe-net';
+import { fetchPrefix } from './probe-net';
 import { recordProbe } from './source-health';
 import {
   removeRecoveredUrls,
@@ -121,89 +121,6 @@ export function pruneExpired(map: ChannelSpeedMap): ChannelSpeedMap {
 // ─── L2：分片复验 ─────────────────────────────────────
 
 /** 读满 maxBytes（或流结束）后拼成文本；播放列表通常几 KB 就结束 */
-async function readTextUpTo(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  first: Uint8Array | undefined,
-  maxBytes: number,
-  deadline = Date.now() + 6000,
-): Promise<string> {
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  if (first && first.length > 0) {
-    chunks.push(first);
-    total += first.length;
-  }
-  while (total < maxBytes) {
-    const remain = deadline - Date.now();
-    if (remain <= 0) break;
-    const r = await readWithTimeout(reader, remain);
-    if (r.timedOut) break;
-    const { value, done } = r;
-    if (done || !value) break;
-    chunks.push(value);
-    total += value.length;
-  }
-  const buf = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) {
-    // 只按 maxBytes 截断，避免超长 VOD 列表把内存吃掉
-    const slice = off + c.length > maxBytes ? c.subarray(0, maxBytes - off) : c;
-    buf.set(slice, off);
-    off += slice.length;
-  }
-  return new TextDecoder().decode(buf.subarray(0, off));
-}
-
-/** 读一 chunk，超时返回 timedOut；用于避免 abort 正在读的 body（Node 20 undici 会崩） */
-async function readWithTimeout(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  ms: number,
-): Promise<{ value?: Uint8Array; done?: boolean; timedOut?: boolean }> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<{ timedOut: true }>((resolve) => {
-    timer = setTimeout(() => resolve({ timedOut: true }), Math.max(1, ms));
-  });
-  try {
-    return await Promise.race([reader.read(), timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-/** 读二进制直到 maxBytes，返回拼接后的 buffer（用于 TS/FLV 头校验） */
-async function readBytesUpTo(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  first: Uint8Array | undefined,
-  maxBytes: number,
-  deadline = Date.now() + 6000,
-): Promise<Uint8Array> {
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  if (first && first.length > 0) {
-    chunks.push(first);
-    total += first.length;
-  }
-  while (total < maxBytes) {
-    const remain = deadline - Date.now();
-    if (remain <= 0) break;
-    const r = await readWithTimeout(reader, remain);
-    if (r.timedOut) break;
-    const { value, done } = r;
-    if (done || !value) break;
-    chunks.push(value);
-    total += value.length;
-  }
-  const buf = new Uint8Array(Math.min(total, maxBytes));
-  let off = 0;
-  for (const c of chunks) {
-    if (off >= buf.length) break;
-    const slice = off + c.length > buf.length ? c.subarray(0, buf.length - off) : c;
-    buf.set(slice, off);
-    off += slice.length;
-  }
-  return buf;
-}
-
 /** 取播放列表里第一个非 # 开头的行，按 base 解析成绝对 URL */
 export function firstUri(playlist: string, base: string): string | null {
   for (const raw of playlist.split(/\r?\n/)) {
@@ -236,78 +153,32 @@ export function lastUri(playlist: string, base: string): string | null {
 
 /** 小请求取文本（用于跟进主播放列表的子列表） */
 async function fetchTextQuick(url: string, maxBytes = 32768): Promise<string | null> {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), CHANNEL_PROBE_SEGMENT_TIMEOUT_MS);
-  try {
-    const resp = await netFetch(url, { signal: ctl.signal, headers: { 'User-Agent': TVBOX_UA } });
-    clearTimeout(timer);
-    if (!resp.ok) return null;
-    const reader = resp.body?.getReader();
-    if (!reader) return null;
-    try {
-      return await readTextUpTo(reader, undefined, maxBytes, Date.now() + CHANNEL_PROBE_SEGMENT_TIMEOUT_MS);
-    } finally {
-      clearTimeout(timer);
-      reader.cancel().catch(() => {});
-    }
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
+  const r = await fetchPrefix(url, maxBytes, CHANNEL_PROBE_SEGMENT_TIMEOUT_MS, {
+    'User-Agent': TVBOX_UA,
+  });
+  if (r.status === 0 || r.status >= 400 || r.data.length === 0) return null;
+  return r.data.toString('utf8');
 }
 
 /** 拉一小段分片，确认真能出数据（不是错误页、不是空响应） */
 async function probeSegment(url: string): Promise<{ ok: boolean; bytes: number; note?: string }> {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), CHANNEL_PROBE_SEGMENT_TIMEOUT_MS);
-  try {
-    const resp = await netFetch(url, { signal: ctl.signal, headers: { 'User-Agent': TVBOX_UA } });
-    // 头已拿到：后续读 body 不能再 abort，否则 Node 20 undici 会抛
-    // ERR_INVALID_STATE: Controller is already closed，直接把进程带崩。
-    clearTimeout(timer);
-    if (!resp.ok) return { ok: false, bytes: 0, note: `分片 HTTP ${resp.status}` };
-    const ctype = (resp.headers.get('content-type') || '').toLowerCase();
-    if (/text\/html|application\/json|text\/plain/.test(ctype)) {
-      return { ok: false, bytes: 0, note: `分片类型 ${ctype.split(';')[0]}` };
-    }
-    const reader = resp.body?.getReader();
-    if (!reader) return { ok: false, bytes: 0, note: '分片无响应体' };
-
-    let got = 0;
-    const readStart = Date.now();
-    const deadline = readStart + CHANNEL_PROBE_SEGMENT_TIMEOUT_MS;
-    try {
-      while (got < CHANNEL_PROBE_SEGMENT_BYTES) {
-        const remain = deadline - Date.now();
-        if (remain <= 0) return { ok: false, bytes: got, note: '分片超时' };
-        const r = await readWithTimeout(reader, remain);
-        if (r.timedOut) return { ok: false, bytes: got, note: '分片超时' };
-        if (r.done || !r.value) break;
-        got += r.value.length;
-      }
-    } finally {
-      clearTimeout(timer);
-      reader.cancel().catch(() => {});
-    }
-
-    const elapsed = Math.max(1, Date.now() - readStart);
-    const kbps = Math.round((got / 1024) / (elapsed / 1000));
-
-    if (got < CHANNEL_PROBE_SEGMENT_MIN_BYTES) {
-      return { ok: false, bytes: got, note: `分片仅 ${got}B` };
-    }
-    // 「能开头、播不动」的源对电视端等于死链：读到数据还不够，吞吐得够
-    if (kbps < CHANNEL_PROBE_SEGMENT_MIN_KBPS) {
-      return { ok: false, bytes: got, note: `吞吐仅 ${kbps}KB/s` };
-    }
-    return { ok: true, bytes: got };
-  } catch (e) {
-    const timedOut = e instanceof Error && e.name === 'AbortError';
-    return { ok: false, bytes: 0, note: timedOut ? '分片超时' : '分片请求失败' };
-  } finally {
-    clearTimeout(timer);
+  const r = await fetchPrefix(url, CHANNEL_PROBE_SEGMENT_BYTES, CHANNEL_PROBE_SEGMENT_TIMEOUT_MS, {
+    'User-Agent': TVBOX_UA,
+  });
+  if (r.status === 0) return { ok: false, bytes: 0, note: r.timedOut ? '分片超时' : '分片请求失败' };
+  if (r.status >= 400) return { ok: false, bytes: 0, note: `分片 HTTP ${r.status}` };
+  const ctype = r.contentType.toLowerCase();
+  if (/text\/html|application\/json|text\/plain/.test(ctype)) {
+    return { ok: false, bytes: r.data.length, note: `分片类型 ${ctype.split(';')[0]}` };
   }
+  const kbps = Math.round((r.data.length / 1024) / Math.max(0.001, r.ms / 1000));
+  if (r.data.length < CHANNEL_PROBE_SEGMENT_MIN_BYTES) {
+    return { ok: false, bytes: r.data.length, note: r.timedOut ? '分片超时' : `分片仅 ${r.data.length}B` };
+  }
+  if (kbps < CHANNEL_PROBE_SEGMENT_MIN_KBPS) {
+    return { ok: false, bytes: r.data.length, note: `吞吐仅 ${kbps}KB/s` };
+  }
+  return { ok: true, bytes: r.data.length };
 }
 
 /**
@@ -373,116 +244,65 @@ export async function probeUrlOnce(url: string, skipL2 = false): Promise<OnceRes
   const isM3U8 = /\.m3u8(\?|$)/i.test(url);
   const isTs = /\.(ts|flv|mp4)(\?|$)/i.test(url);
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), CHANNEL_PROBE_TIMEOUT_MS);
-  const start = Date.now();
-
-  try {
-    const resp = await netFetch(url, {
-      signal: controller.signal,
-      headers: { 'User-Agent': TVBOX_UA },
-    });
-    const ttfb = Date.now() - start;
-    // 头到了就停掉 abort：后面读 body 时再 abort 会触发 undici 的
-    // ERR_INVALID_STATE，进程直接退出。body 超时交给 readWithTimeout。
-    clearTimeout(timer);
-    const deadline = start + CHANNEL_PROBE_TIMEOUT_MS;
-
-    if (!resp.ok) {
-      clearTimeout(timer);
-      return { speedMs: 0, kind: 'fail', timedOut: false };
-    }
-
-    const reader = resp.body?.getReader();
-    if (!reader) {
-      clearTimeout(timer);
-      return { speedMs: ttfb, kind: 'tcp', timedOut: false };
-    }
-
-    try {
-      const firstRead = await readWithTimeout(reader, Math.max(1, deadline - Date.now()));
-      if (firstRead.timedOut) {
-        return { speedMs: 0, kind: 'fail', timedOut: true };
-      }
-      const value = firstRead.value;
-      if (!value) {
-        return { speedMs: ttfb, kind: 'tcp', timedOut: false };
-      }
-
-      // 有些源地址不以 .m3u8 结尾（migu.php?pid=… / 直播壳短链），但返回的确实是播放列表。
-      // 只按扩展名判断会让它们绕过 L2，直接以「首包可达」排到最前。
-      const headText = new TextDecoder().decode(value.slice(0, Math.min(2048, value.length)));
-      const playlistLike = isM3U8 || (!isTs && headText.includes('#EXTM3U'));
-
-      if (playlistLike) {
-        // 列表本身很小（几 KB），读完再判断；只看前 1KB 会漏掉后面的 #EXT-X-STREAM-INF
-        const playlist = await readTextUpTo(reader, value, 64 * 1024, deadline);
-        if (!playlist.includes('#EXTM3U')) {
-          return { speedMs: 0, kind: 'fail', timedOut: false, stage: 'playlist', note: '不是 m3u8' };
-        }
-        if (!segmentCheckEnabled || skipL2) {
-          return { speedMs: ttfb, kind: 'm3u8', timedOut: false, stage: 'playlist' };
-        }
-
-        // L2：列表可达不等于能播 —— 分片可能指向另一台已失效的源站。
-        // 先释放列表连接，再单独拉分片（分片有自己的 4 秒超时）。
-        await reader.cancel().catch(() => {});
-        const check = await verifyPlayable(playlist, url);
-        if (!check.ok) {
-          return { speedMs: 0, kind: 'fail', timedOut: false, stage: 'segment', note: check.note };
-        }
-        return { speedMs: ttfb, kind: 'm3u8', timedOut: false, stage: 'segment', note: check.note };
-      }
-
-      const ctype = (resp.headers.get('content-type') || '').toLowerCase();
-      if (/text\/html|application\/json|text\/plain/.test(ctype)) {
-        return { speedMs: 0, kind: 'fail', timedOut: false, note: `非视频内容 ${ctype.split(';')[0]}` };
-      }
-
-      const binaryLike = isTs || /octet-stream|video\//.test(ctype);
-      if (!binaryLike) {
-        // 以前这里直接返回 tcp 并算「可用」，导致 migu.php 之类返回错误页也能排到前排。
-        return { speedMs: 0, kind: 'fail', timedOut: false, note: '非视频内容' };
-      }
-
-      // 读满 64KB：只读到首包就判活，会放过「开头出数据、随后卡死」的源
-      const buf = await readBytesUpTo(
-        reader, value, CHANNEL_PROBE_SEGMENT_BYTES,
-        Date.now() + CHANNEL_PROBE_SEGMENT_TIMEOUT_MS,
-      );
-      const elapsed = Math.max(1, Date.now() - start);
-      const kbps = Math.round((buf.length / 1024) / (elapsed / 1000));
-      if (buf.length < CHANNEL_PROBE_SEGMENT_MIN_BYTES) {
-        return { speedMs: 0, kind: 'fail', timedOut: false, stage: 'segment', note: `仅 ${buf.length}B` };
-      }
-      if (kbps < CHANNEL_PROBE_SEGMENT_MIN_KBPS) {
-        return { speedMs: 0, kind: 'fail', timedOut: false, stage: 'segment', note: `吞吐 ${kbps}KB/s` };
-      }
-
-      const end = Math.min(4096, buf.length);
-      let hasTsSync = false;
-      for (let i = 0; i < end; i += 188) {
-        if (buf[i] === 0x47) { hasTsSync = true; break; }
-      }
-      if (hasTsSync) {
-        return { speedMs: ttfb, kind: 'ts', timedOut: false, stage: 'segment' };
-      }
-      const isFlv = buf.length > 3 && buf[0] === 0x46 && buf[1] === 0x4c && buf[2] === 0x56;
-      const isMp4 = buf.length > 8
-        && buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70; // ftyp
-      if (isFlv || isMp4) {
-        return { speedMs: ttfb, kind: 'tcp', timedOut: false, stage: 'segment' };
-      }
-      return { speedMs: 0, kind: 'fail', timedOut: false, note: '无法识别容器' };
-    } finally {
-      clearTimeout(timer);
-      reader.cancel().catch(() => {});
-    }
-  } catch (e: unknown) {
-    clearTimeout(timer);
-    const timedOut = e instanceof Error && e.name === 'AbortError';
-    return { speedMs: 0, kind: 'fail', timedOut };
+  // 读满 64KB 再判断：只读首包会放过「开头出数据、随后卡死」的源。
+  // fetchPrefix 用 undici.request 的 Node Readable，读够就 destroy，不会触发
+  // WebStream 的 ERR_INVALID_STATE 崩溃。
+  const r = await fetchPrefix(url, CHANNEL_PROBE_SEGMENT_BYTES, CHANNEL_PROBE_TIMEOUT_MS, {
+    'User-Agent': TVBOX_UA,
+  });
+  if (r.status === 0) {
+    return { speedMs: 0, kind: 'fail', timedOut: r.timedOut, note: r.timedOut ? '连接超时' : '连接失败' };
   }
+  if (r.status >= 400) {
+    return { speedMs: 0, kind: 'fail', timedOut: false, note: `HTTP ${r.status}` };
+  }
+  const ctype = r.contentType.toLowerCase();
+  if (/text\/html|application\/json|text\/plain/.test(ctype)) {
+    return { speedMs: 0, kind: 'fail', timedOut: false, note: `非视频内容 ${ctype.split(';')[0]}` };
+  }
+
+  const data = r.data;
+  const headText = data.subarray(0, Math.min(2048, data.length)).toString('utf8');
+  const playlistLike = isM3U8 || (!isTs && headText.includes('#EXTM3U'));
+
+  if (playlistLike) {
+    const playlist = data.toString('utf8');
+    if (!playlist.includes('#EXTM3U')) {
+      return { speedMs: 0, kind: 'fail', timedOut: false, stage: 'playlist', note: '不是 m3u8' };
+    }
+    if (!segmentCheckEnabled || skipL2) {
+      return { speedMs: r.ms, kind: 'm3u8', timedOut: false, stage: 'playlist' };
+    }
+    const check = await verifyPlayable(playlist, url);
+    if (!check.ok) {
+      return { speedMs: 0, kind: 'fail', timedOut: false, stage: 'segment', note: check.note };
+    }
+    return { speedMs: r.ms, kind: 'm3u8', timedOut: false, stage: 'segment', note: check.note };
+  }
+
+  const binaryLike = isTs || /octet-stream|video\//.test(ctype);
+  if (!binaryLike) {
+    return { speedMs: 0, kind: 'fail', timedOut: false, note: '非视频内容' };
+  }
+
+  const kbps = Math.round((data.length / 1024) / Math.max(0.001, r.ms / 1000));
+  if (data.length < CHANNEL_PROBE_SEGMENT_MIN_BYTES) {
+    return { speedMs: 0, kind: 'fail', timedOut: r.timedOut, stage: 'segment', note: r.timedOut ? '读取超时' : `仅 ${data.length}B` };
+  }
+  if (kbps < CHANNEL_PROBE_SEGMENT_MIN_KBPS) {
+    return { speedMs: 0, kind: 'fail', timedOut: false, stage: 'segment', note: `吞吐 ${kbps}KB/s` };
+  }
+
+  const end = Math.min(4096, data.length);
+  let hasTsSync = false;
+  for (let i = 0; i < end; i += 188) {
+    if (data[i] === 0x47) { hasTsSync = true; break; }
+  }
+  if (hasTsSync) return { speedMs: r.ms, kind: 'ts', timedOut: false, stage: 'segment' };
+  const isFlv = data.length > 3 && data[0] === 0x46 && data[1] === 0x4c && data[2] === 0x56;
+  const isMp4 = data.length > 8 && data[4] === 0x66 && data[5] === 0x74 && data[6] === 0x79 && data[7] === 0x70;
+  if (isFlv || isMp4) return { speedMs: r.ms, kind: 'tcp', timedOut: false, stage: 'segment' };
+  return { speedMs: 0, kind: 'fail', timedOut: false, note: '无法识别容器' };
 }
 
 /**
